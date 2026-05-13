@@ -56,6 +56,15 @@ class SoundDeviceRecorder:
     """
 
     def __init__(self, sample_rate=DEFAULT_SAMPLE_RATE, channels=DEFAULT_CHANNELS):
+        """録音設定と stream 所有状態を初期化する。
+
+        Params:
+        - sample_rate: WAV と入力 stream の sample rate。
+        - channels: 入力 channel 数。
+
+        Caller:
+        - この時点では sounddevice を import せず、`start()` で遅延 import する。
+        """
         self.sample_rate = sample_rate
         self.channels = channels
         self.stream = None
@@ -82,6 +91,17 @@ class SoundDeviceRecorder:
         self.audio_chunks = []
 
         def record_callback(indata, frames, time_info, status):
+            """sounddevice callback から録音 chunk を蓄積する。
+
+            Params:
+            - indata: 今回受け取った音声 buffer。
+            - frames: callback の frame 数。現状は制御に使わない。
+            - time_info: sounddevice の時刻情報。現状は使わない。
+            - status: 入力 stream の警告状態。値があれば標準出力へ出す。
+
+            Caller:
+            - sounddevice の audio thread から呼ばれるため、pygame 状態には触らない。
+            """
             if status:
                 print(f"音声入力ステータス: {status}")
             self.audio_chunks.append(indata.copy())
@@ -150,6 +170,16 @@ class FasterWhisperTranscriber:
         device=DEFAULT_WHISPER_DEVICE,
         compute_type=DEFAULT_WHISPER_COMPUTE_TYPE,
     ):
+        """faster-whisper のモデル設定を保持する。
+
+        Params:
+        - model_size: Whisper モデルサイズまたはモデル ID。
+        - device: `cpu` / `cuda` などの推論 device。
+        - compute_type: `int8` など faster-whisper に渡す計算型。
+
+        Caller:
+        - モデル本体は初回 `transcribe()` まで読み込まない。
+        """
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
@@ -216,6 +246,18 @@ class VoiceInput:
         max_transcription_seconds=DEFAULT_MAX_TRANSCRIPTION_SECONDS,
         clock=time.monotonic,
     ):
+        """音声入力状態、認識 worker、結果 queue を初期化する。
+
+        Params:
+        - recorder: 録音実装。`None` の場合は `SoundDeviceRecorder` を作る。
+        - transcriber: 文字起こし実装。`None` の場合は `FasterWhisperTranscriber` を作る。
+        - status_text_limit: UI に表示する認識結果/エラー文の最大文字数。
+        - max_transcription_seconds: 認識 timeout 秒数。`None` は timeout しない。
+        - clock: timeout 判定に使う単調時刻関数。
+
+        Caller:
+        - pygame state はここでは持たない。ゲーム本体との通信は event queue 経由に限定する。
+        """
         self.recorder = recorder if recorder is not None else SoundDeviceRecorder()
         self.transcriber = transcriber if transcriber is not None else FasterWhisperTranscriber()
         self.status_text_limit = status_text_limit
@@ -381,6 +423,15 @@ class VoiceInput:
         return "Vキーで音声入力"
 
     def _transcribe_worker(self, audio_path, transcription_id):
+        """WAV を文字起こしし、現在有効な認識だけ queue へ発行する。
+
+        Params:
+        - audio_path: worker が所有する一時 WAV ファイルパス。finally で削除する。
+        - transcription_id: 開始時点の認識 ID。timeout や次回認識で古くなった結果を捨てる。
+
+        Caller:
+        - worker thread の entry point。pygame state は直接変更しない。
+        """
         try:
             recognized_text = self.transcriber.transcribe(audio_path)
             recognized_text = normalize_ascii_width(recognized_text.strip())
@@ -405,10 +456,24 @@ class VoiceInput:
             self._remove_audio_file(audio_path)
 
     def _is_active_transcription(self, transcription_id):
+        """指定 ID が現在有効な認識 worker か返す。
+
+        Params:
+        - transcription_id: worker 開始時に割り当てた ID。
+
+        Returns:
+        - `True`: 現在の active ID と一致する。
+        - `False`: timeout または次回認識で古くなった。
+        """
         with self._lock:
             return transcription_id == self._active_transcription_id
 
     def _expire_transcription_if_needed(self):
+        """認識 worker が timeout を超えていれば状態を解放する。
+
+        Caller:
+        - main thread 側の状態取得前に呼ぶ。古い worker の結果は ID 不一致で捨てる。
+        """
         if self.max_transcription_seconds is None:
             return
 
@@ -434,6 +499,14 @@ class VoiceInput:
             )
 
     def _publish_error(self, message):
+        """音声入力エラーを状態、UI 用文言、event queue に反映する。
+
+        Params:
+        - message: 詳細エラー。空文字列の場合は汎用メッセージへ置き換える。
+
+        Caller:
+        - main thread / worker thread の両方から呼ばれるため、共有状態は lock 内で更新する。
+        """
         error_message = message if message != "" else "音声入力に失敗しました"
         with self._lock:
             self.state = VOICE_STATE_IDLE
@@ -444,6 +517,17 @@ class VoiceInput:
         self._event_queue.put(VoiceInputEvent(kind=VOICE_EVENT_ERROR, message=error_message))
 
     def _clip_status_value(self, value):
+        """UI 表示用に長い音声入力文言を切り詰める。
+
+        Params:
+        - value: 認識結果またはエラー文字列。
+
+        Returns:
+        - `status_text_limit` 以下の文字列。
+
+        Caller:
+        - 内部状態は変更しない。描画前の文字列整形だけを行う。
+        """
         if len(value) <= self.status_text_limit:
             return value
         if self.status_text_limit <= 3:
@@ -451,6 +535,14 @@ class VoiceInput:
         return value[: self.status_text_limit - 3] + "..."
 
     def _remove_audio_file(self, audio_path):
+        """一時 WAV ファイルを存在する場合だけ削除する。
+
+        Params:
+        - audio_path: 削除対象ファイルパス。`None` は何もしない。
+
+        Caller:
+        - 削除失敗は録音/認識結果より優先しないため、標準出力へ出して握りつぶす。
+        """
         if audio_path is None:
             return
         try:

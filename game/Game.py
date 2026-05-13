@@ -204,6 +204,12 @@ class Game:
         self.monsters.append(monster)
 
     def render_box(self):
+        """所持 item box の個数表示を描画する。
+
+        Caller:
+        - `player.item_box` と `text_font` 初期化後に毎フレーム呼ぶ。
+        - item sprite 自体の描画は `all_sprites.draw()` 側が担当する。
+        """
         for idx, item in enumerate(self.player.item_box):
             if isinstance(item, Item):
                 count = item.check_count()
@@ -233,6 +239,15 @@ class Game:
         return False
 
     def is_text_input_active(self):
+        """テキスト入力欄が現在アクティブか返す。
+
+        Returns:
+        - `True`: 入力欄が選択されている。
+        - `False`: 入力欄がない、または非アクティブ。
+
+        Caller:
+        - 入力欄操作中にショートカットキーで item を誤使用しないために使う。
+        """
         text_input_box = getattr(self, "text_input_box", None)
         if text_input_box is None:
             return False
@@ -544,6 +559,17 @@ class Game:
         self.player.action_type = None
 
     def text_preprocess(self, text):
+        """ゲームコマンド入力を比較用の正規化文字列へ変換する。
+
+        Params:
+        - text: UI 入力、音声認識結果、または alias 文字列。
+
+        Returns:
+        - `normalize_text()` 後の文字列。
+
+        Caller:
+        - slot 解決、alias 比較、分類前処理で同じ正規化境界を使う。
+        """
         return normalize_text(text)
 
     def building_name_matches_text(self, building, text):
@@ -625,6 +651,12 @@ class Game:
         return generic_text
 
     def is_nlp_model_loading(self):
+        """NLP warm-up が loading 中か返す。
+
+        Returns:
+        - `True`: warm-up state が loading。
+        - `False`: eval 側に state API がない、または loading 以外。
+        """
         get_warmup_state = getattr(eval, "get_warmup_state", None)
         if get_warmup_state is None:
             return False
@@ -632,6 +664,12 @@ class Game:
         return get_warmup_state() == warmup_loading_state
 
     def is_nlp_model_warmup_failed(self):
+        """NLP warm-up が error 状態か返す。
+
+        Returns:
+        - `True`: warm-up state が error。
+        - `False`: eval 側に state API がない、または error 以外。
+        """
         get_warmup_state = getattr(eval, "get_warmup_state", None)
         if get_warmup_state is None:
             return False
@@ -822,12 +860,30 @@ class Game:
         return nearest_monster
 
     def get_object_position(self, obj):
+        """object から距離計算用の位置 tuple を取得する。
+
+        Params:
+        - obj: `position`、または `x` / `y` を持つ object。
+
+        Returns:
+        - `position` があればその値。
+        - なければ `(x, y)`。どちらもなければ `(0, 0)`。
+        """
         position = getattr(obj, "position", None)
         if position is not None:
             return position
         return (getattr(obj, "x", 0), getattr(obj, "y", 0))
 
     def has_generic_potion_alias(self, text):
+        """入力文が曖昧なポーション指定を含むか返す。
+
+        Params:
+        - text: コマンド入力。関数内で正規化する。
+
+        Returns:
+        - `True`: `ポーション` や `薬` のような汎用 alias を含む。
+        - `False`: 汎用 alias を含まない。
+        """
         normalized_text = self.text_preprocess(text)
         for alias in self.generic_potion_aliases:
             if alias in normalized_text:
@@ -835,6 +891,19 @@ class Game:
         return False
 
     def make_potion_choice(self, item_type, box_index=None, count=None):
+        """選択 UI 用のポーション候補 dict を作る。
+
+        Params:
+        - item_type: `HP_Potion` または `MP_Potion` の class。
+        - box_index: 使用対象の item box index。購入候補では `None`。
+        - count: 現在所持数。購入候補では `None`。
+
+        Returns:
+        - `item_type` / 表示名 / alias と、必要なら `box_index` / `count` を持つ dict。
+
+        Caller:
+        - `item_type` は `potion_choice_specs` に登録済みである必要がある。
+        """
         spec = self.potion_choice_specs[item_type]
         choice = {
             "item_type": item_type,
@@ -848,6 +917,14 @@ class Game:
         return choice
 
     def get_shop_potion_choices(self):
+        """現在の商店で購入できるポーション候補を返す。
+
+        Returns:
+        - 選択 UI 用 choice 配列。販売対象がない場合は空配列。
+
+        Caller:
+        - `current_shop` があればそれを優先し、なければ `self.shop` を使う。
+        """
         choices = []
         shop = getattr(self, "current_shop", self.shop)
         for item_type in shop.item_type_list:
@@ -856,6 +933,14 @@ class Game:
         return choices
 
     def get_player_potion_choices(self):
+        """プレイヤーが現在使用できるポーション候補を返す。
+
+        Returns:
+        - 選択 UI 用 choice 配列。同じ item type は最初の slot だけを返す。
+
+        Caller:
+        - 複数 slot に同型 item がある場合、既存仕様では 1 候補にまとめる。
+        """
         choices = []
         seen_item_types = set()
         for idx, item in enumerate(self.player.item_box):
@@ -867,6 +952,15 @@ class Game:
         return choices
 
     def build_choice_prompt(self, action, choices):
+        """選択待ち UI に表示する候補文を組み立てる。
+
+        Params:
+        - action: `buy` または `use`。
+        - choices: `make_potion_choice()` が作った候補配列。
+
+        Returns:
+        - 番号付き候補を含む表示文字列。
+        """
         action_text = "買います" if action == "buy" else "使います"
         parts = [f"{idx + 1}: {choice['name']}" for idx, choice in enumerate(choices)]
         return f"どのポーションを{action_text}か？ " + " ".join(parts)
@@ -934,6 +1028,19 @@ class Game:
         return False
 
     def parse_pending_choice_input(self, text, choices):
+        """選択待ち入力を候補と数量へ変換する。
+
+        Params:
+        - text: `2 2`、`mp,2`、`HPポーション/1` のような入力。
+        - choices: 選択可能な choice 配列。
+
+        Returns:
+        - `(choice, count)`。choice がない場合は `(None, count)`。
+        - 空入力の場合は `(None, 0)`。
+
+        Caller:
+        - count は 1 未満の可能性があるため、実行前に呼び出し側で検査する。
+        """
         tokens = self.split_pending_choice_tokens(text)
         if len(tokens) == 0:
             return None, 0
@@ -974,6 +1081,19 @@ class Game:
         ]
 
     def execute_pending_buy(self, choice, count):
+        """選択済みポーションを指定個数購入する。
+
+        Params:
+        - choice: `make_potion_choice()` が作った購入候補。
+        - count: 購入個数。呼び出し側で 1 以上を保証する。
+
+        Returns:
+        - `True`: 購入できた。
+        - `False`: 購入に失敗した。
+
+        Caller:
+        - 成功時は action_result を購入結果で上書きする。
+        """
         item_instance = choice["item_type"](count=count)
         if self.player.buy(item_instance, self.shop):
             txt = f"{choice['name']}を{count}個購入しました。"
@@ -983,6 +1103,19 @@ class Game:
         return False
 
     def execute_pending_use(self, choice, count):
+        """選択済みポーションを最大 count 回使用する。
+
+        Params:
+        - choice: `make_potion_choice()` が作った使用候補。
+        - count: 使用回数。呼び出し側で 1 以上を保証する。
+
+        Returns:
+        - `True`: 1 回以上使用した。
+        - `False`: 対象 item がない、または使用できなかった。
+
+        Caller:
+        - 所持数が count 未満の場合は、使える分だけ使って成功扱いにする。
+        """
         used_count = 0
         item_type = choice["item_type"]
         for _ in range(count):
@@ -1003,12 +1136,35 @@ class Game:
         return True
 
     def find_item_index(self, item_type):
+        """指定 item type を持つ最初の item box index を返す。
+
+        Params:
+        - item_type: 探す item class。
+
+        Returns:
+        - item box index。
+        - `None`: 所持していない。
+        """
         for idx, item in enumerate(self.player.item_box):
             if isinstance(item, Item) and type(item) == item_type:
                 return idx
         return None
 
     def use_position_with_eval(self, text, item, name_list):
+        """分類済み使用コマンドから item 使用を実行する。
+
+        Params:
+        - text: 正規化済み入力文。
+        - item: 使用対象 item class。
+        - name_list: この item を指す alias 配列。
+
+        Returns:
+        - `True`: 対象 alias があり、item を使用した。
+        - `False`: alias がない、または所持 item が見つからない。
+
+        Caller:
+        - 数字が含まれる場合は使用数として扱う。`全部` 系の語があれば所持数全量を使う。
+        """
         for name in name_list:
             if name in text:
                 all_use_text_list = ['全部', 'すべて', '全て', 'ぜんぶ']
@@ -1032,6 +1188,20 @@ class Game:
         return False
 
     def buy_item_with_eval(self, text, item, name_list):
+        """分類済み購入コマンドから item 購入を実行する。
+
+        Params:
+        - text: 正規化済み入力文。
+        - item: 購入対象 item class。
+        - name_list: この item を指す alias 配列。
+
+        Returns:
+        - `True`: alias があり購入できた。
+        - `False`: alias がない、または購入できなかった。
+
+        Caller:
+        - 数字が含まれる場合は購入数として扱う。数字がなければ 1 個購入する。
+        """
         for name in name_list:
             if name in text:
                 count = re.sub(r"\D", "", text)

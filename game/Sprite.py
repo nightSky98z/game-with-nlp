@@ -23,6 +23,16 @@ class Sprite(pygame.sprite.Sprite):
         self.rect.y = y
 
     def load_and_scale_image(self, image_path, size, fallback_color):
+        """画像を読み込んで size に合わせ、失敗時は矩形 Surface を作る。
+
+        Params:
+        - image_path: 読み込み対象の画像パス。
+        - size: 出力 Surface のサイズ。
+        - fallback_color: 画像を読めない場合に塗る色。
+
+        Caller:
+        - 戻り後は `self.image` が必ず pygame Surface を指す。
+        """
         try:
             # 画像が存在するか確認
             if not os.path.exists(image_path):
@@ -46,5 +56,13 @@ class Sprite(pygame.sprite.Sprite):
         self.rect.center = original_center
 
     def change_position(self, position):
+        """sprite の左上座標を変更する。
+
+        Params:
+        - position: `(x, y)`。item box などの固定表示座標を渡す。
+
+        Caller:
+        - center ではなく rect 左上を更新する。
+        """
         self.rect.x = position[0]
         self.rect.y = position[1]

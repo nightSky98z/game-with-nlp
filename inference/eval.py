@@ -154,6 +154,12 @@ def _set_warmup_error(error_code, error_message):
 
 
 def _warmup_models():
+    """カテゴリ/タイプモデルを読み込み、Ruri 初回推論まで先に実行する。
+
+    Caller:
+    - `start_async_warmup()` が作る background thread からだけ呼ぶ。
+    - 失敗時は例外を thread 外へ漏らさず、warm-up error state に変換する。
+    """
     global _warmup_state
     global _warmup_error_message
     global _warmup_error_code
@@ -258,6 +264,11 @@ def eval(text_list, label_list, model):
 
 
 def main():
+    """保存済みモデルの簡易評価を標準出力へ表示する。
+
+    Caller:
+    - モジュールを直接実行した時の手動確認用。ゲーム実行経路では使わない。
+    """
     text_list = ["ドミノを倒します。", "プリンがあります。", "大阪に行くます。", "スライムがいます。", "HPポーションを買う。", "ポーションを使用する。"]
     label_list1 = [
         unknown,

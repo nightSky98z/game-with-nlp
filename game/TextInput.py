@@ -4,6 +4,17 @@ from game.UIFont import create_ui_font
 
 class TextInput:
     def __init__(self, x, y, width, height):
+        """pygame のテキスト入力欄と IME composition 状態を初期化する。
+
+        Params:
+        - x: 入力欄左上 x。
+        - y: 入力欄左上 y。
+        - width: 初期幅。描画時は入力文字幅に応じて広がる。
+        - height: 入力欄高さ。
+
+        Caller:
+        - pygame 初期化後に作る。日本語入力の環境設定は上位で済ませる。
+        """
         # 初期設定
         self.rect = pygame.Rect(x, y, width, height)
         self.text = ""
@@ -21,6 +32,20 @@ class TextInput:
         self.submitted_full_text = ""
 
     def handle_event(self, event, game_object=None):
+        """pygame event を入力欄状態へ反映し、Return で送信文字列を返す。
+
+        Params:
+        - event: pygame event。mouse / key / text input / text editing を処理する。
+        - game_object: `nlp_text` を持つゲーム本体。`None` の場合は戻り値だけ返す。
+
+        Returns:
+        - 送信された文字列。
+        - 空文字列: 送信なし、または送信直後の IME 後追い commit を捨てた。
+
+        Caller:
+        - active 状態でないキー入力は無視する。
+        - Return 送信時に入力欄と composition は空にする。
+        """
         # マウスクリックの処理
         if event.type == pygame.MOUSEBUTTONDOWN:
             if self.rect.collidepoint(event.pos):
@@ -99,6 +124,14 @@ class TextInput:
         self.submitted_full_text = ""
 
     def draw(self, screen):
+        """入力中テキストと IME composition を画面へ描画する。
+
+        Params:
+        - screen: pygame の描画先 Surface。
+
+        Caller:
+        - 毎フレーム main thread から呼ぶ。表示幅は現在の文字列幅に合わせて更新される。
+        """
         # テキストを描画
         display_text = self.text + self.composition
         txt_surface = self.font.render(display_text, True, self.color)
@@ -112,6 +145,11 @@ class TextInput:
         pygame.draw.rect(screen, self.color, self.rect, 2)
 
 def main():
+    """TextInput 単体確認用の pygame ループを起動する。
+
+    Caller:
+    - モジュールを直接実行した場合だけ使う。ゲーム本体の起動経路では呼ばない。
+    """
     pygame.init()
     screen = pygame.display.set_mode((800, 600))
     clock = pygame.time.Clock()

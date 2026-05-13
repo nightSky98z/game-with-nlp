@@ -12,6 +12,15 @@ class SpriteSheet:
     """
 
     def __init__(self, filename, fallback_color=(255, 0, 0)):
+        """スプライトシート画像を読み込み、失敗時は矩形 fallback を保持する。
+
+        Params:
+        - filename: 読み込み対象の画像パス。
+        - fallback_color: 画像欠落時に生成する Surface の色。
+
+        Caller:
+        - 画像が読めない場合も `get_image()` は Surface を返す。
+        """
         self.filename = filename
         self.fallback_color = fallback_color
         try:
@@ -21,6 +30,17 @@ class SpriteSheet:
             self.sprite_sheet = None
 
     def get_image(self, x, y, width, height):
+        """スプライトシートから指定矩形を切り出して返す。
+
+        Params:
+        - x: 切り出し元の左上 x。
+        - y: 切り出し元の左上 y。
+        - width: 切り出し幅。
+        - height: 切り出し高さ。
+
+        Returns:
+        - pygame Surface。画像欠落時は `fallback_color` で塗った矩形。
+        """
         image = pygame.Surface([width, height])
         if self.sprite_sheet is None:
             image.fill(self.fallback_color)
@@ -30,6 +50,15 @@ class SpriteSheet:
         return image
 
     def get_all_sprites(self, width, height):
+        """スプライトシート全体を固定サイズの Surface 配列へ分割する。
+
+        Params:
+        - width: 1 sprite の幅。
+        - height: 1 sprite の高さ。
+
+        Returns:
+        - Surface 配列。画像欠落時は fallback Surface 1 枚だけを返す。
+        """
         sprites = []
         if self.sprite_sheet is None:
             sprites.append(self.get_image(0, 0, width, height))

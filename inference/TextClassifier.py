@@ -66,6 +66,15 @@ class RuriSentenceEmbeddingBackend:
     """
 
     def __init__(self, model_name: str = DEFAULT_RURI_MODEL_NAME, device: str = DEFAULT_RURI_DEVICE):
+        """Ruri embedding backend の設定だけを保持する。
+
+        Params:
+        - model_name: Hugging Face Hub またはローカルの SentenceTransformer モデル ID。
+        - device: `cpu` / `cuda` などの推論 device。
+
+        Caller:
+        - 実モデルは `encode()` まで読み込まない。
+        """
         self.model_name = model_name
         self.device = device
         self.model = None
@@ -94,6 +103,17 @@ class RuriSentenceEmbeddingBackend:
             raise TextClassifierError("Ruri v3 embedding の生成に失敗しました") from err
 
     def _get_model(self):
+        """SentenceTransformer モデルを共有 cache から取得または遅延ロードする。
+
+        Returns:
+        - SentenceTransformer instance。
+
+        Errors:
+        - TextClassifierError: sentence-transformers import、または Ruri モデルロードに失敗した。
+
+        Caller:
+        - 同じ `(model_name, device)` は process 内 cache で共有する。
+        """
         if self.model is not None:
             return self.model
         cache_key = (self.model_name, self.device)
@@ -140,6 +160,18 @@ class RuriEmbeddingTextClassifier:
         device: str = DEFAULT_RURI_DEVICE,
         batch_size: int = DEFAULT_RURI_BATCH_SIZE,
     ):
+        """Ruri embedding 分類器の依存 object と推論設定を保持する。
+
+        Params:
+        - label_classifier: embedding を入力に取る分類器。`None` なら LogisticRegression。
+        - embedding_backend: `encode()` を持つ backend。`None` なら Ruri backend を遅延作成する。
+        - model_name: Ruri モデル ID。
+        - device: embedding 推論 device。
+        - batch_size: embedding 生成 batch size。
+
+        Caller:
+        - この時点では学習も Ruri モデルロードも行わない。
+        """
         self.label_classifier = label_classifier if label_classifier is not None else build_label_classifier()
         self.embedding_backend = embedding_backend
         self.model_name = model_name
@@ -188,6 +220,14 @@ class RuriEmbeddingTextClassifier:
         return self._get_embedding_backend().encode(prefixed_texts, batch_size=self.batch_size)
 
     def _get_embedding_backend(self):
+        """embedding backend を遅延作成して返す。
+
+        Returns:
+        - `encode(texts, batch_size)` を持つ backend。
+
+        Caller:
+        - joblib ロード直後は `embedding_backend` が `None` のため、この境界で再作成する。
+        """
         if self.embedding_backend is None:
             self.embedding_backend = RuriSentenceEmbeddingBackend(
                 model_name=self.model_name,
@@ -196,6 +236,14 @@ class RuriEmbeddingTextClassifier:
         return self.embedding_backend
 
     def __getstate__(self):
+        """joblib 保存時に embedding backend 本体を保存対象から外す。
+
+        Returns:
+        - pickle/joblib 用 state dict。
+
+        Caller:
+        - SentenceTransformer 実体は重く、保存モデルの責務ではないため再ロードに任せる。
+        """
         state = self.__dict__.copy()
         state["embedding_backend"] = None
         return state
