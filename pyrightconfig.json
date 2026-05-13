@@ -3,39 +3,16 @@
   "venv": ".venv",
   "typeCheckingMode": "basic",
   "include": [
-    "Building.py",
-    "Character.py",
-    "Color.py",
-    "Game.py",
-    "GameConfig.py",
-    "GameUtils.py",
-    "Item.py",
     "Main.py",
-    "Model1.py",
-    "Model2.py",
-    "Shop.py",
-    "Sprite.py",
-    "SpriteSheet.py",
-    "TextClassifier.py",
-    "TextInput.py",
-    "TextUtils.py",
-    "VoiceInput.py",
-    "eval.py"
+    "game",
+    "inference",
+    "training"
   ],
   "exclude": [
     ".venv",
     "__pycache__",
     "docs",
-    "program.ipynb",
-    "co_matrix.py",
-    "cos_similarity.py",
-    "keitaiso.py",
-    "pygame-sample.py",
-    "similarity.py",
-    "test.py",
-    "test2.py",
-    "test4.py",
-    "test5.py",
+    "unrelated",
     "test_regressions.py"
   ]
 }

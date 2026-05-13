@@ -4,19 +4,19 @@ import pygame
 from typing import List
 import re
 
-import Color
-from Character import Monster, Player
-from Item import HP_Potion, Item, MP_Potion
-from Shop import Shop
-from GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
-from TextInput import TextInput
-from Building import Building
-import eval
-from GameConfig import GameConfig
-from Character import Goblin
-from Character import Slime
-from TextUtils import normalize_text
-from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
+from game import Color
+from game.Character import Monster, Player
+from game.Item import HP_Potion, Item, MP_Potion
+from game.Shop import Shop
+from game.GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
+from game.TextInput import TextInput
+from game.Building import Building
+from inference import eval
+from game.GameConfig import GameConfig
+from game.Character import Goblin
+from game.Character import Slime
+from inference.TextUtils import normalize_text
+from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
 
 class Game:
     """ゲームのメインクラス"""

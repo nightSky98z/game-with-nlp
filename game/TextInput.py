@@ -1,7 +1,7 @@
 import pygame
 import sys
 import os
-from TextUtils import normalize_ascii_width
+from inference.TextUtils import normalize_ascii_width
 
 os.environ['SDL_IM_MODULE'] = 'fcitx'
 

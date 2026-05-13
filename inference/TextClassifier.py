@@ -1,7 +1,7 @@
 import glob
 import os
 
-from TextUtils import normalize_text
+from inference.TextUtils import normalize_text
 
 
 class TextClassifierError(RuntimeError):

@@ -1,6 +1,6 @@
-from Sprite import Sprite
-from GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
-from Color import BLUE, RED, WHITE
+from game.Sprite import Sprite
+from game.GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
+from game.Color import BLUE, RED, WHITE
 
 HP_POTION_PATH = "./resources/hp_potion.png"
 MP_POTION_PATH = "./resources/mp_potion.png"

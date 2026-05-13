@@ -5,16 +5,16 @@ from typing import List, Literal, Tuple
 from pygame import Rect
 from pygame import draw
 
-from GameUtils import BOX_POSITION, check_is_number
-from GameUtils import distance_square
-from GameUtils import normalize
-from GameUtils import calc_vector_length
-from GameUtils import can_attack
-from Shop import Shop
-from Color import GREED, RED, WHITE
-from Item import HP_Potion, Item
-from Building import  Building
-from SpriteSheet import SpriteSheet
+from game.GameUtils import BOX_POSITION, check_is_number
+from game.GameUtils import distance_square
+from game.GameUtils import normalize
+from game.GameUtils import calc_vector_length
+from game.GameUtils import can_attack
+from game.Shop import Shop
+from game.Color import GREED, RED, WHITE
+from game.Item import HP_Potion, Item
+from game.Building import Building
+from game.SpriteSheet import SpriteSheet
 
 slime_sprites = "./resources/Slime1_Idle_full.png"
 orc_idle_full = "./resources/orc1_idle_full.png"

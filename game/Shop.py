@@ -1,7 +1,7 @@
 import pygame.image
 
-from Building import Building
-from Color import BLUE
+from game.Building import Building
+from game.Color import BLUE
 
 class Shop(Building):
     def __init__(self, name="shop", x=10, y=10, sprite=None, game=None, item_type_list=None):

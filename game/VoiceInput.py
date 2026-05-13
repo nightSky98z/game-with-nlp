@@ -7,7 +7,7 @@ import threading
 import wave
 from dataclasses import dataclass
 
-from TextUtils import normalize_ascii_width
+from inference.TextUtils import normalize_ascii_width
 
 
 VOICE_STATE_IDLE = "idle"
