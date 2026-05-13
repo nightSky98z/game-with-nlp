@@ -2,15 +2,12 @@ import sys
 import os
 import pygame
 from typing import List
-from enum import Enum
 import re
 
-import Building
 import Color
 from Character import Monster, Player
 from Item import HP_Potion, Item, MP_Potion
 from Shop import Shop
-from Sprite import Sprite
 from GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
 from TextInput import TextInput
 from Building import Building
@@ -75,7 +72,7 @@ class Game:
         self.text_input_box = TextInput(100, 550, 200, 50)
         self.nlp_text = ""
         self.start_eval = False
-        self.pending_choice = None
+        self.pending_choice: dict | None = None
         self.voice_input = VoiceInput()
 
     def setup_characters(self) -> None:
@@ -146,11 +143,12 @@ class Game:
         self.all_sprites.update()
         self.all_sprites.draw(self.screen)
 
-        if self.player.is_attack_action():
-            self.player.move_to(self.player.target)
-            self.player.attack(self.player.target)
-        if self.player.is_move_action():
-            self.player.move_to(self.player.target)
+        target = self.player.target
+        if isinstance(target, Monster) and self.player.action_type == "combat":
+            self.player.move_to(target)
+            self.player.attack(target)
+        elif isinstance(target, (Monster, Building)) and self.player.action_type == "movement":
+            self.player.move_to(target)
 
     def render(self) -> None:
         """画面描画"""
@@ -517,6 +515,8 @@ class Game:
         self.player.target = None
         self.player.action_type = None
         pending_choice = self.pending_choice
+        if pending_choice is None:
+            return False
         choice, count = self.parse_pending_choice_input(text, pending_choice["choices"])
         if choice is None or count < 1:
             txt = "選択できません。 " + self.build_choice_prompt(pending_choice["action"], pending_choice["choices"])

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Tuple, List
+from typing import List, Literal, Tuple
 from pygame import Rect
 from pygame import draw
 
@@ -89,9 +91,9 @@ class Player(Character):
         self._init_status()
         self.setup_default_item()
         # 移動あるいは戦闘のターゲット
-        self.target = None
+        self.target: Monster | Building | None = None
         # 戦闘か移動かを判断する変数
-        self.action_type = None
+        self.action_type: Literal["movement", "combat"] | None = None
 
     def _init_status(self) -> None:
         """プレイヤーの初期ステータス"""

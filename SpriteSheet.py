@@ -30,6 +30,10 @@ class SpriteSheet:
 
     def get_all_sprites(self, width, height):
         sprites = []
+        if self.sprite_sheet is None:
+            sprites.append(self.get_image(0, 0, width, height))
+            return sprites
+
         sheet_width = self.sprite_sheet.get_width()
         sheet_height = self.sprite_sheet.get_height()
 
