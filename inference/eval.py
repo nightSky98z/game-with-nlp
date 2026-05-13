@@ -51,7 +51,7 @@ def _get_model(model_path):
     """保存済み軽量分類器を遅延ロードしてキャッシュする。
 
     引数:
-        model_path: `Model1.py` または `Model2.py` が保存した joblib ファイル。
+        model_path: `model1_sklearn.joblib` または `model2_sklearn.joblib` のパス。
 
     戻り値:
         `predict` を持つ学習済み分類器。
@@ -179,6 +179,31 @@ def _warmup_models():
         _warmup_error_code = None
 
 
+def _predict_label_from_model_path(model_path, text):
+    """保存済みモデルを使い、推論境界の失敗を `ModelLoadError` に揃える。
+
+    Params:
+    - model_path: `model1_sklearn.joblib` または `model2_sklearn.joblib` のパス。
+    - text: ゲーム UI または ASR から渡される未正規化文字列。
+
+    Returns:
+    - 整数ラベル ID。
+
+    Errors:
+    - ModelLoadError: モデル読み込み、embedding 生成、分類器推論のいずれかが失敗した。
+
+    Caller:
+    - ゲーム側は `ModelLoadError` を安全終了境界として扱う。
+    """
+    model = _get_model(model_path)
+    try:
+        return predict_label_id(model, text)
+    except TextClassifierError as err:
+        raise ModelLoadError(str(err)) from err
+    except Exception as err:
+        raise ModelLoadError(f"モデル推論に失敗しました: {model_path}: {err}") from err
+
+
 def predict_category(text: str) -> int:
     """入力テキストを行動カテゴリ ID に分類する。
 
@@ -189,10 +214,9 @@ def predict_category(text: str) -> int:
         `movement` / `combat` などの整数ラベル ID。
 
     例外:
-        ModelLoadError: `model1_sklearn.joblib` を読み込めない。
+        ModelLoadError: `model1_sklearn.joblib` の読み込み、embedding 生成、分類器推論に失敗した。
     """
-    model = _get_model(MODEL1_PATH)
-    return predict_label_id(model, text)
+    return _predict_label_from_model_path(MODEL1_PATH, text)
 
 
 def predict_type(text: str) -> int:
@@ -205,10 +229,9 @@ def predict_type(text: str) -> int:
         `map` または `box` の整数ラベル ID。
 
     例外:
-        ModelLoadError: `model2_sklearn.joblib` を読み込めない。
+        ModelLoadError: `model2_sklearn.joblib` の読み込み、embedding 生成、分類器推論に失敗した。
     """
-    model = _get_model(MODEL2_PATH)
-    return predict_label_id(model, text)
+    return _predict_label_from_model_path(MODEL2_PATH, text)
 
 
 def eval(text_list, label_list, model):

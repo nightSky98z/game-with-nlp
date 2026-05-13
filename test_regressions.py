@@ -941,6 +941,35 @@ class GameRegressionTests(unittest.TestCase):
         finally:
             os.unlink(model_path)
 
+    def test_eval_predict_category_wraps_classifier_error_as_model_load_error(self):
+        target_eval = importlib.import_module("inference.eval")
+        target_eval._get_model = lambda model_path: object()
+
+        def failing_predict_label_id(model, text):
+            raise target_eval.TextClassifierError("embedding 生成失敗")
+
+        target_eval.predict_label_id = failing_predict_label_id
+
+        with self.assertRaises(target_eval.ModelLoadError) as error_context:
+            target_eval.predict_category("ゴブリンを倒して")
+
+        self.assertIn("embedding 生成失敗", str(error_context.exception))
+
+    def test_eval_predict_type_wraps_unexpected_predict_error_as_model_load_error(self):
+        target_eval = importlib.import_module("inference.eval")
+        target_eval._get_model = lambda model_path: object()
+
+        def failing_predict_label_id(model, text):
+            raise ValueError("分類器の出力が壊れています")
+
+        target_eval.predict_label_id = failing_predict_label_id
+
+        with self.assertRaises(target_eval.ModelLoadError) as error_context:
+            target_eval.predict_type("ポーションを使う")
+
+        self.assertIn("モデル推論に失敗しました", str(error_context.exception))
+        self.assertIn("分類器の出力が壊れています", str(error_context.exception))
+
     def test_eval_async_warmup_loads_models_and_forces_embedding_warmup(self):
         import threading as real_threading
 

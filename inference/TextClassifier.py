@@ -264,10 +264,11 @@ def train_text_classifier(
         labels: `texts` と同じ長さの整数ラベル配列。
 
     戻り値:
-        学習済み scikit-learn Pipeline。
+        学習済み `RuriEmbeddingTextClassifier`。
 
     例外:
-        TextClassifierError: 入力件数が不一致、または 2 クラス未満。
+        TextClassifierError: 入力件数不一致、2 クラス未満、または embedding 生成に失敗した。
+        その他の例外: 渡された label classifier の `fit()` が失敗した場合はそのまま呼び出し側へ伝播する。
     """
     if len(texts) != len(labels):
         raise TextClassifierError("texts と labels の件数が一致しません")
@@ -289,7 +290,7 @@ def save_text_classifier(classifier, model_path: str) -> None:
     """学習済み分類器を joblib 形式で保存する。
 
     引数:
-        classifier: `predict` を持つ学習済み scikit-learn Pipeline。
+        classifier: `predict` を持つ学習済み分類器。`RuriEmbeddingTextClassifier` も保存対象になる。
         model_path: 保存先ファイルパス。親ディレクトリがある場合はこの関数が作成する。
 
     例外:
@@ -343,6 +344,9 @@ def predict_label_id(classifier, text: str) -> int:
 
     戻り値:
         整数ラベル ID。
+
+    例外:
+        classifier の `predict()` が失敗した場合は、その例外を呼び出し側へ伝播する。
     """
     normalized_text = normalize_text(text)
     predicted_labels = classifier.predict([normalized_text])

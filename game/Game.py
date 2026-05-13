@@ -296,7 +296,20 @@ class Game:
 
 # nlp部分
     def eval_text(self, text):
-        """入力されたテキストをモデルで評価"""
+        """入力テキストを分類し、対応するゲーム操作を実行する。
+
+        Params:
+        - text: UI または音声認識から渡される入力文。関数内で正規化して使う。
+
+        Returns:
+        - `True`: 対応する操作を実行できた。
+        - `False`: 操作できない、選択待ち、モデル読み込み中、または安全終了へ移った。
+        - `None`: 未知行動、対象未検出、または戻り値を使わない既存分岐。
+
+        Caller:
+        - この関数は player target、action_type、item_box、pending_choice、画面表示を変更する。
+        - NLP モデルロード失敗時は `running = False` にして、上位の shutdown 経路へ渡す。
+        """
         self.start_eval = True
         if getattr(self, "pending_choice", None) is not None:
             return self.resolve_pending_choice(text)
@@ -698,7 +711,8 @@ class Game:
         - `None`: 明示モンスター名がない。
 
         Caller:
-        - `None` の場合だけ、ターゲット省略コマンドとして最寄り fallback を許可する。
+        - 戦闘対象が見つからなかったとき、既知名を使ったエラーメッセージを作るために使う。
+        - 最寄り fallback を許可するかどうかは `extract_explicit_combat_target()` の結果で判断する。
         """
         for monster_name in self.known_monster_names:
             if monster_name in text:
@@ -951,7 +965,7 @@ class Game:
         - 正規化済みトークン配列。空入力または区切りだけの場合は空配列。
 
         Caller:
-        - 先頭トークンを選択子、2番目の数値トークンを数量として扱う。
+        - 先頭トークンを選択子として扱う。2 番目のトークンが数値なら数量として扱う。
         """
         return [
             self.text_preprocess(token)

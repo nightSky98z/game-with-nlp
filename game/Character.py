@@ -190,7 +190,21 @@ class Player(Character):
         self.take(hp_potion)
 
     def have_item(self, item=None, index=None, add_item=False):
-        """itemあるいはindexを渡して、アイテムの所持をチェックする"""
+        """所持中アイテムを型で探し、必要なら同型アイテム数を加算する。
+
+        Params:
+        - item: 探す対象の item。`add_item=True` の場合は、この item の count を既存 item に移す。
+        - index: 所持スロット index。指定時はそのスロットの item 型を使って同型 item を探す。
+        - add_item: `True` の場合、同型 item が見つかれば count と UI 表示を更新する。
+
+        Returns:
+        - `True`: 同型 item を所持している。
+        - `False`: `item` も `index` も指定されていない。
+        - `None`: 探したが同型 item が見つからない。
+
+        Caller:
+        - 純粋な確認関数ではない。`add_item=True` では item_box と action_result を変更する。
+        """
         def check():
             for i in self.item_box:
                 # 同じアイテムの種類で
