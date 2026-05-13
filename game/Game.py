@@ -1,5 +1,3 @@
-import sys
-import os
 import pygame
 from typing import List
 import re
@@ -8,7 +6,7 @@ from game import Color
 from game.Character import Monster, Player
 from game.Item import HP_Potion, Item, MP_Potion
 from game.Shop import Shop
-from game.GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
+from game.GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET, distance_square
 from game.TextInput import TextInput
 from game.Building import Building
 from inference import eval
@@ -16,12 +14,15 @@ from game.GameConfig import GameConfig
 from game.Character import Goblin
 from game.Character import Slime
 from inference.TextUtils import normalize_text
+from game.TextInputEnvironment import configure_text_input_environment
 from game.UIFont import create_ui_font
 from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
 
 class Game:
     """ゲームのメインクラス"""
 
+    known_monster_names = ("ゴブリン", "スライム")
+    minimum_monster_name_similarity = 0.4
     potion_choice_specs = {
         HP_Potion: {
             "name": "HPポーション",
@@ -33,14 +34,14 @@ class Game:
         },
     }
     generic_potion_aliases = ("ポーション", "薬")
+    generic_combat_target_names = ("敵", "モンスター")
     # 選択待ち中だけ、短い入力の選択子と数量を記号でも分けられるようにする。
     pending_choice_separator_pattern = r"[\s,;/、，；／]+"
 
     def __init__(self) -> None:
         """ゲームの初期化"""
+        configure_text_input_environment()
         pygame.init()
-        # 環境変数の設定　日本語を入力できるため
-        os.environ['SDL_IM_MODULE'] = 'fcitx'   # または'ibus'
 
         self.setup_display()
         self.setup_game_components()
@@ -67,8 +68,6 @@ class Game:
         self.tmr = 0
         self.running = True
 
-        # テキスト入力
-        pygame.key.start_text_input()
         # テキストボックス
         self.text_input_box = TextInput(100, 550, 200, 50)
         self.nlp_text = ""
@@ -110,6 +109,8 @@ class Game:
     def update(self) -> None:
         """メインゲームループ"""
         self.handle_events()
+        if not self.running:
+            return
         self.consume_voice_input_events()
         self.render()
         self.maintain_frame_rate()
@@ -122,7 +123,7 @@ class Game:
                 self.running = False
 
             elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_u:
+                if event.key == pygame.K_u and not self.is_text_input_active():
                     self.player.use(index=0)
 
             self.handle_voice_input_event(event)
@@ -173,10 +174,17 @@ class Game:
     def shutdown(self) -> None:
         """ゲームの終了処理"""
         self.running = False
-        if hasattr(self, "voice_input"):
-            self.voice_input.wait_for_pending_transcription(timeout_seconds=1.0)
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
+
+        voice_input = getattr(self, "voice_input", None)
+        if voice_input is not None:
+            if hasattr(voice_input, "shutdown"):
+                voice_input.shutdown(timeout_seconds=1.0)
+            else:
+                voice_input.wait_for_pending_transcription(timeout_seconds=1.0)
         pygame.quit()
-        sys.exit()
 
     def init_monsters(self) -> None:
         """モンスターの初期配置"""
@@ -216,6 +224,12 @@ class Game:
             self.voice_input.stop_recording_and_transcribe()
             return True
         return False
+
+    def is_text_input_active(self):
+        text_input_box = getattr(self, "text_input_box", None)
+        if text_input_box is None:
+            return False
+        return bool(getattr(text_input_box, "active", False))
 
     def consume_voice_input_events(self):
         """音声認識 worker の結果を main thread 側で消費する。
@@ -298,11 +312,38 @@ class Game:
             return
 
         elif label_category == eval.combat and label_type == eval.map:
-            for i, monster in enumerate(self.monsters):
-                if monster.name in text:
-                    self.player.target = self.monsters[i]
+            target_monster = self.find_alive_monster_named_in_text(text)
+            if target_monster is not None:
+                self.player.target = target_monster
+                self.player.action_type = "combat"
+                return True
+
+            explicit_target_text = self.extract_explicit_combat_target(text)
+            if explicit_target_text is not None:
+                similar_monster, similarity = self.find_most_similar_alive_monster(explicit_target_text)
+                if similar_monster is not None:
+                    self.player.target = similar_monster
                     self.player.action_type = "combat"
-                    return
+                    print(f"音声ターゲット補正: {explicit_target_text}->{similar_monster.name} ({similarity:.2f})")
+                    txt = f"{similar_monster.name}:戦闘"
+                    self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+                    return True
+
+                mentioned_monster_name = self.find_mentioned_known_monster_name(text)
+                missing_target_name = mentioned_monster_name if mentioned_monster_name is not None else explicit_target_text
+                txt = f"{missing_target_name}がマップにいませんでした。"
+                print(txt)
+                self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+                return False
+
+            nearest_monster = self.find_nearest_monster()
+            if nearest_monster is not None:
+                self.player.target = nearest_monster
+                self.player.action_type = "combat"
+                txt = f"{nearest_monster.name}:戦闘"
+                print(txt)
+                self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+                return True
             print('モンスターがマップにいませんでした。')
             txt = 'モンスターがマップにいませんでした。'
             self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
@@ -425,6 +466,152 @@ class Game:
 
     def text_preprocess(self, text):
         return normalize_text(text)
+
+    def find_alive_monster_named_in_text(self, text):
+        """入力文に含まれる生存モンスターを返す。
+
+        Params:
+        - text: `text_preprocess()` 後の入力文。呼び出し中は変更しない。
+
+        Returns:
+        - 名前が入力文に含まれる生存 monster。
+        - `None`: 名前一致する生存 monster が現在マップにいない。
+
+        Caller:
+        - 明示ターゲットが存在する場合は、最寄り fallback より先にこの結果を使う。
+        """
+        for monster in self.monsters:
+            if not getattr(monster, "alive", True):
+                continue
+            if monster.name in text:
+                return monster
+        return None
+
+    def find_mentioned_known_monster_name(self, text):
+        """入力文に含まれる既知モンスター名を返す。
+
+        Params:
+        - text: `text_preprocess()` 後の入力文。呼び出し中は変更しない。
+
+        Returns:
+        - 入力文に含まれる既知モンスター名。
+        - `None`: 明示モンスター名がない。
+
+        Caller:
+        - `None` の場合だけ、ターゲット省略コマンドとして最寄り fallback を許可する。
+        """
+        for monster_name in self.known_monster_names:
+            if monster_name in text:
+                return monster_name
+        return None
+
+    def extract_explicit_combat_target(self, text):
+        """戦闘文にある明示ターゲット名を返す。
+
+        Params:
+        - text: `text_preprocess()` 後の入力文。呼び出し中は変更しない。
+
+        Returns:
+        - `を` の前にあるターゲット文字列。
+        - `None`: ターゲット省略、または `敵` / `モンスター` のような汎用対象。
+
+        Caller:
+        - `None` でない場合は、まず現在マップ上のモンスター名との類似度で対象解決する。
+        """
+        object_marker_index = text.find("を")
+        if object_marker_index <= 0:
+            return None
+
+        target_text = text[:object_marker_index]
+        for generic_target_name in self.generic_combat_target_names:
+            if generic_target_name in target_text:
+                return None
+        return target_text
+
+    def find_most_similar_alive_monster(self, target_text):
+        """明示ターゲット名に最も似ている生存モンスターを返す。
+
+        Params:
+        - target_text: 音声認識から得たターゲット名。呼び出し中は変更しない。
+
+        Returns:
+        - `(monster, similarity)`。類似度が閾値以上の生存 monster。
+        - `(None, best_similarity)`。候補なし、または最高類似度が低すぎる。
+
+        Caller:
+        - `None` の場合は最寄り fallback せず、指定対象はマップにいないものとして扱う。
+        """
+        normalized_target_text = self.text_preprocess(target_text)
+        best_monster = None
+        best_similarity = 0.0
+        for monster in self.monsters:
+            if not getattr(monster, "alive", True):
+                continue
+            monster_name = self.text_preprocess(monster.name)
+            similarity = self.calculate_monster_name_similarity(normalized_target_text, monster_name)
+            if similarity > best_similarity:
+                best_monster = monster
+                best_similarity = similarity
+
+        if best_similarity < self.minimum_monster_name_similarity:
+            return None, best_similarity
+        return best_monster, best_similarity
+
+    def calculate_monster_name_similarity(self, left_name, right_name):
+        """モンスター名同士の連続文字一致率を返す。
+
+        Params:
+        - left_name: 音声認識から得た名前。
+        - right_name: マップ上にいるモンスター名。
+
+        Returns:
+        - `0.0` から `1.0` の類似度。空文字列を含む場合は `0.0`。
+
+        Caller:
+        - 短い固有名詞用の軽量比較。閾値は `minimum_monster_name_similarity` で管理する。
+        """
+        if left_name == "" or right_name == "":
+            return 0.0
+
+        previous_lengths = [0] * (len(right_name) + 1)
+        longest_common_length = 0
+        for left_char in left_name:
+            current_lengths = [0] * (len(right_name) + 1)
+            for right_index, right_char in enumerate(right_name, start=1):
+                if left_char == right_char:
+                    current_lengths[right_index] = previous_lengths[right_index - 1] + 1
+                    longest_common_length = max(longest_common_length, current_lengths[right_index])
+            previous_lengths = current_lengths
+        return longest_common_length / max(len(left_name), len(right_name))
+
+    def find_nearest_monster(self):
+        """プレイヤーから最も近い生存モンスターを返す。
+
+        Returns:
+        - 最寄りの monster。
+        - `None`: マップ上に生存モンスターがいない。
+
+        Caller:
+        - 戦闘コマンドに明示ターゲット名が含まれない場合だけ使う。
+        """
+        player_position = self.get_object_position(self.player)
+        nearest_monster = None
+        nearest_distance_square = None
+        for monster in self.monsters:
+            if not getattr(monster, "alive", True):
+                continue
+            monster_position = self.get_object_position(monster)
+            current_distance_square = distance_square(player_position, monster_position)
+            if nearest_distance_square is None or current_distance_square < nearest_distance_square:
+                nearest_monster = monster
+                nearest_distance_square = current_distance_square
+        return nearest_monster
+
+    def get_object_position(self, obj):
+        position = getattr(obj, "position", None)
+        if position is not None:
+            return position
+        return (getattr(obj, "x", 0), getattr(obj, "y", 0))
 
     def has_generic_potion_alias(self, text):
         normalized_text = self.text_preprocess(text)

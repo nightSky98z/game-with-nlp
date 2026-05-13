@@ -4,6 +4,7 @@ import os
 import queue
 import tempfile
 import threading
+import time
 import wave
 from dataclasses import dataclass
 
@@ -21,9 +22,10 @@ VOICE_EVENT_ERROR = "error"
 VOICE_STATUS_TEXT_LIMIT = 40
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
-DEFAULT_WHISPER_MODEL_SIZE = "small"
+DEFAULT_WHISPER_MODEL_SIZE = "tiny"
 DEFAULT_WHISPER_DEVICE = "cpu"
 DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
+DEFAULT_MAX_TRANSCRIPTION_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -180,7 +182,8 @@ class FasterWhisperTranscriber:
             audio_path,
             language="ja",
             condition_on_previous_text=False,
-            vad_filter=True,
+            beam_size=1,
+            vad_filter=False,
         )
         text_parts = []
         for segment in segments:
@@ -197,22 +200,35 @@ class VoiceInput:
     - recorder: `start()` と `stop_to_wav_file()` を持つ録音オブジェクト。`None` なら sounddevice 実装を使う。
     - transcriber: `transcribe(audio_path)` を持つ認識オブジェクト。`None` なら faster-whisper 実装を使う。
     - status_text_limit: UI に出す認識結果とエラー文の最大文字数。
+    - max_transcription_seconds: 認識 worker を待つ最大秒数。timeout 後は状態を解放し、古い結果を捨てる。
+    - clock: timeout 判定用の単調時刻関数。
 
     Caller:
     - pygame の main thread から `start_recording()` / `stop_recording_and_transcribe()` / `poll_event()` を呼ぶ。
     - worker thread はゲーム状態を直接触らない。認識結果は `poll_event()` で main thread が処理する。
     """
 
-    def __init__(self, recorder=None, transcriber=None, status_text_limit=VOICE_STATUS_TEXT_LIMIT):
+    def __init__(
+        self,
+        recorder=None,
+        transcriber=None,
+        status_text_limit=VOICE_STATUS_TEXT_LIMIT,
+        max_transcription_seconds=DEFAULT_MAX_TRANSCRIPTION_SECONDS,
+        clock=time.monotonic,
+    ):
         self.recorder = recorder if recorder is not None else SoundDeviceRecorder()
         self.transcriber = transcriber if transcriber is not None else FasterWhisperTranscriber()
         self.status_text_limit = status_text_limit
+        self.max_transcription_seconds = max_transcription_seconds
+        self._clock = clock
         self.state = VOICE_STATE_IDLE
         self.last_recognized_text = None
         self.last_error_message = None
         self._event_queue = queue.Queue()
         self._lock = threading.Lock()
         self._worker_thread = None
+        self._active_transcription_id = 0
+        self._transcription_started_at = None
 
     def start_recording(self):
         """録音を開始する。
@@ -223,6 +239,7 @@ class VoiceInput:
         Caller:
         - `False` の場合は既存状態を維持するため、追加の stop は呼ばない。
         """
+        self._expire_transcription_if_needed()
         with self._lock:
             if self.state != VOICE_STATE_IDLE:
                 return False
@@ -264,10 +281,13 @@ class VoiceInput:
 
         with self._lock:
             self.state = VOICE_STATE_TRANSCRIBING
+            self._active_transcription_id += 1
+            transcription_id = self._active_transcription_id
+            self._transcription_started_at = self._clock()
 
         worker_thread = threading.Thread(
             target=self._transcribe_worker,
-            args=(audio_path,),
+            args=(audio_path, transcription_id),
             daemon=True,
         )
         self._worker_thread = worker_thread
@@ -283,6 +303,7 @@ class VoiceInput:
         Caller:
         - pygame main thread で毎フレーム呼ぶ。戻り値が `recognized_text` の時だけ `eval_text()` へ渡す。
         """
+        self._expire_transcription_if_needed()
         try:
             return self._event_queue.get_nowait()
         except queue.Empty:
@@ -306,12 +327,44 @@ class VoiceInput:
         worker_thread.join(timeout=timeout_seconds)
         return not worker_thread.is_alive()
 
+    def shutdown(self, timeout_seconds=1.0):
+        """音声入力で保持している録音 stream と worker 待機境界を閉じる。
+
+        Params:
+        - timeout_seconds: 認識 worker の終了を待つ最大秒数。`None` は無制限待機。
+
+        Returns:
+        - worker が存在しない、または待機時間内に終了した場合は `True`。
+        - timeout 後も認識 worker が動いている場合は `False`。
+
+        Caller:
+        - ゲーム終了時に main thread から呼ぶ。
+        - 認識処理自体は外部ライブラリ内でキャンセルできないため、長時間待たない。
+        """
+        should_stop_recording = False
+        with self._lock:
+            if self.state == VOICE_STATE_RECORDING:
+                should_stop_recording = True
+
+        if should_stop_recording:
+            try:
+                audio_path = self.recorder.stop_to_wav_file()
+                self._remove_audio_file(audio_path)
+            except Exception as err:
+                print(f"音声入力終了エラー: {err}")
+            with self._lock:
+                if self.state == VOICE_STATE_RECORDING:
+                    self.state = VOICE_STATE_IDLE
+
+        return self.wait_for_pending_transcription(timeout_seconds=timeout_seconds)
+
     def get_status_text(self):
         """現在の音声入力 UI 文言を返す。
 
         Returns:
         - `録音しています`、`音声を認識しています`、認識結果、エラー、または待機文言。
         """
+        self._expire_transcription_if_needed()
         with self._lock:
             state = self.state
             last_recognized_text = self.last_recognized_text
@@ -327,23 +380,58 @@ class VoiceInput:
             return "認識: " + self._clip_status_value(last_recognized_text)
         return "Vキーで音声入力"
 
-    def _transcribe_worker(self, audio_path):
+    def _transcribe_worker(self, audio_path, transcription_id):
         try:
             recognized_text = self.transcriber.transcribe(audio_path)
             recognized_text = normalize_ascii_width(recognized_text.strip())
             if recognized_text == "":
-                self._publish_error("音声を認識できませんでした")
+                if self._is_active_transcription(transcription_id):
+                    self._publish_error("音声を認識できませんでした")
                 return
 
             with self._lock:
+                if transcription_id != self._active_transcription_id:
+                    return
                 self.state = VOICE_STATE_IDLE
                 self.last_recognized_text = recognized_text
                 self.last_error_message = None
+                self._transcription_started_at = None
+            print(f"音声認識結果: {recognized_text}")
             self._event_queue.put(VoiceInputEvent(kind=VOICE_EVENT_RECOGNIZED_TEXT, text=recognized_text))
         except Exception as err:
-            self._publish_error(str(err))
+            if self._is_active_transcription(transcription_id):
+                self._publish_error(str(err))
         finally:
             self._remove_audio_file(audio_path)
+
+    def _is_active_transcription(self, transcription_id):
+        with self._lock:
+            return transcription_id == self._active_transcription_id
+
+    def _expire_transcription_if_needed(self):
+        if self.max_transcription_seconds is None:
+            return
+
+        should_publish_timeout = False
+        with self._lock:
+            if self.state != VOICE_STATE_TRANSCRIBING or self._transcription_started_at is None:
+                return
+            elapsed_seconds = self._clock() - self._transcription_started_at
+            if elapsed_seconds <= self.max_transcription_seconds:
+                return
+
+            self._active_transcription_id += 1
+            self.state = VOICE_STATE_IDLE
+            self.last_error_message = "音声認識がタイムアウトしました"
+            self.last_recognized_text = None
+            self._transcription_started_at = None
+            should_publish_timeout = True
+
+        if should_publish_timeout:
+            print("音声入力エラー: 音声認識がタイムアウトしました")
+            self._event_queue.put(
+                VoiceInputEvent(kind=VOICE_EVENT_ERROR, message="音声認識がタイムアウトしました")
+            )
 
     def _publish_error(self, message):
         error_message = message if message != "" else "音声入力に失敗しました"
@@ -351,6 +439,7 @@ class VoiceInput:
             self.state = VOICE_STATE_IDLE
             self.last_error_message = error_message
             self.last_recognized_text = None
+            self._transcription_started_at = None
         print(f"音声入力エラー: {error_message}")
         self._event_queue.put(VoiceInputEvent(kind=VOICE_EVENT_ERROR, message=error_message))
 

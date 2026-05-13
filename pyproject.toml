@@ -10,5 +10,8 @@ dependencies = [
     "numpy>=1.26",
     "pygame>=2.6.1",
     "scikit-learn>=1.4",
+    "sentence-transformers>=3.4",
     "sounddevice>=0.5",
+    "torch>=2.2",
+    "transformers>=4.48",
 ]

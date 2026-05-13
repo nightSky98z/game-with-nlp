@@ -125,13 +125,30 @@ class FakePygame(types.ModuleType):
         )
         self.image = types.SimpleNamespace(load=self._load_missing_image)
         self.transform = types.SimpleNamespace(scale=lambda image, size: FakeSurface(size))
+        self.key_start_count = 0
+        self.key_stop_count = 0
+        self.text_input_rects = []
         self.key = types.SimpleNamespace(
-            start_text_input=lambda: None,
-            set_text_input_rect=lambda rect: None,
+            start_text_input=self._start_text_input,
+            stop_text_input=self._stop_text_input,
+            set_text_input_rect=self._set_text_input_rect,
         )
+        self.quit_called = 0
 
     def _load_missing_image(self, filename):
         raise FileNotFoundError(filename)
+
+    def _start_text_input(self):
+        self.key_start_count += 1
+
+    def _stop_text_input(self):
+        self.key_stop_count += 1
+
+    def _set_text_input_rect(self, rect):
+        self.text_input_rects.append(rect)
+
+    def quit(self):
+        self.quit_called += 1
 
 
 def install_fake_pygame():
@@ -182,7 +199,9 @@ class GameRegressionTests(unittest.TestCase):
             "game.GameUtils",
             "game.GameConfig",
             "game.UIFont",
+            "game.TextInputEnvironment",
             "joblib",
+            "faster_whisper",
         )
 
     def test_sprite_sheet_missing_asset_uses_requested_rectangle_color(self):
@@ -242,6 +261,111 @@ class GameRegressionTests(unittest.TestCase):
         Main.main()
 
         self.assertEqual(1, FakeGame.init_count)
+
+    def test_main_shutdown_runs_when_keyboard_interrupt_stops_loop(self):
+        fake_game_module = types.ModuleType("game.Game")
+
+        class InterruptingGame:
+            shutdown_count = 0
+
+            def __init__(self):
+                self.running = True
+
+            def update(self):
+                raise KeyboardInterrupt
+
+            def shutdown(self):
+                type(self).shutdown_count += 1
+                self.running = False
+
+        fake_game_module.Game = InterruptingGame
+        sys.modules["game.Game"] = fake_game_module
+
+        import Main
+
+        Main.main()
+
+        self.assertEqual(1, InterruptingGame.shutdown_count)
+
+    def test_game_shutdown_quits_pygame_without_raising_system_exit(self):
+        pygame = install_fake_pygame()
+        from game.Game import Game
+
+        class FakeVoiceInput:
+            def __init__(self):
+                self.shutdown_timeout = None
+
+            def shutdown(self, timeout_seconds=None):
+                self.shutdown_timeout = timeout_seconds
+
+        game = Game.__new__(Game)
+        game.running = True
+        game.voice_input = FakeVoiceInput()
+
+        game.shutdown()
+
+        self.assertFalse(game.running)
+        self.assertEqual(1.0, game.voice_input.shutdown_timeout)
+        self.assertEqual(1, pygame.quit_called)
+
+    def test_game_update_stops_before_rendering_after_quit_event(self):
+        pygame = install_fake_pygame()
+        from game.Game import Game
+
+        quit_event = types.SimpleNamespace(type=pygame.QUIT)
+        pygame.event = types.SimpleNamespace(get=lambda: [quit_event])
+
+        game = Game.__new__(Game)
+        game.running = True
+        game.nlp_text = ""
+        game.text_input_box = types.SimpleNamespace(handle_event=lambda event, game_object: "")
+        game.consume_count = 0
+        game.render_count = 0
+        game.tick_count = 0
+
+        def consume_voice_input_events():
+            game.consume_count += 1
+
+        def render():
+            game.render_count += 1
+
+        def maintain_frame_rate():
+            game.tick_count += 1
+
+        game.consume_voice_input_events = consume_voice_input_events
+        game.render = render
+        game.maintain_frame_rate = maintain_frame_rate
+
+        game.update()
+
+        self.assertFalse(game.running)
+        self.assertEqual(0, game.consume_count)
+        self.assertEqual(0, game.render_count)
+        self.assertEqual(0, game.tick_count)
+
+    def test_game_does_not_use_item_shortcut_while_text_input_is_active(self):
+        pygame = install_fake_pygame()
+        from game.Game import Game
+
+        key_event = types.SimpleNamespace(type=pygame.KEYUP, key=pygame.K_u)
+        pygame.event = types.SimpleNamespace(get=lambda: [key_event])
+
+        class FakePlayer:
+            def __init__(self):
+                self.use_calls = []
+
+            def use(self, index):
+                self.use_calls.append(index)
+                return True
+
+        game = Game.__new__(Game)
+        game.nlp_text = ""
+        game.player = FakePlayer()
+        game.text_input_box = types.SimpleNamespace(active=True, handle_event=lambda event, game_object: "")
+
+        game.handle_events()
+
+        self.assertEqual([], game.player.use_calls)
 
     def test_player_take_returns_false_when_box_is_full(self):
         install_fake_pygame()
@@ -315,6 +439,97 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual("AbC123ポーション", game_object.nlp_text)
         self.assertEqual("", text_input.text)
 
+    def test_text_input_submits_uncommitted_ime_composition_on_return(self):
+        install_fake_pygame()
+        from game.TextInput import TextInput
+
+        text_input = TextInput(0, 0, 200, 40)
+        text_input.active = True
+        text_input.text = "ゴブリンを"
+        text_input.composition = "倒して"
+        game_object = types.SimpleNamespace(nlp_text="")
+        return_event = types.SimpleNamespace(type=3, key=13)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            submitted = text_input.handle_event(return_event, game_object)
+
+        self.assertEqual("ゴブリンを倒して", submitted)
+        self.assertEqual("ゴブリンを倒して", game_object.nlp_text)
+        self.assertEqual("", text_input.text)
+        self.assertEqual("", text_input.composition)
+
+    def test_text_input_ignores_ime_commit_after_return_submit(self):
+        install_fake_pygame()
+        from game.TextInput import TextInput
+
+        text_input = TextInput(0, 0, 200, 40)
+        text_input.active = True
+        text_input.text = "ゴブリンを"
+        text_input.composition = "倒して"
+        game_object = types.SimpleNamespace(nlp_text="")
+        return_event = types.SimpleNamespace(type=3, key=13)
+        late_commit_event = types.SimpleNamespace(type=5, text="倒して")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            text_input.handle_event(return_event, game_object)
+        text_input.handle_event(late_commit_event, game_object)
+
+        self.assertEqual("ゴブリンを倒して", game_object.nlp_text)
+        self.assertEqual("", text_input.text)
+        self.assertEqual("", text_input.composition)
+
+    def test_text_input_accepts_new_text_after_plain_return_submit(self):
+        install_fake_pygame()
+        from game.TextInput import TextInput
+
+        text_input = TextInput(0, 0, 200, 40)
+        text_input.active = True
+        text_input.text = "a"
+        game_object = types.SimpleNamespace(nlp_text="")
+        return_event = types.SimpleNamespace(type=3, key=13)
+        next_text_event = types.SimpleNamespace(type=5, text="a")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            text_input.handle_event(return_event, game_object)
+        text_input.handle_event(next_text_event, game_object)
+
+        self.assertEqual("a", game_object.nlp_text)
+        self.assertEqual("a", text_input.text)
+        self.assertEqual("", text_input.composition)
+
+    def test_text_input_clears_composition_when_textinput_commits(self):
+        install_fake_pygame()
+        from game.TextInput import TextInput
+
+        text_input = TextInput(0, 0, 200, 40)
+        text_input.active = True
+        text_input.composition = "倒して"
+        text_event = types.SimpleNamespace(type=5, text="倒して")
+
+        text_input.handle_event(text_event)
+
+        self.assertEqual("倒して", text_input.text)
+        self.assertEqual("", text_input.composition)
+
+    def test_text_input_enables_ime_only_while_active(self):
+        pygame = install_fake_pygame()
+        from game.TextInput import TextInput
+
+        text_input = TextInput(0, 0, 200, 40)
+
+        self.assertEqual(0, pygame.key_start_count)
+        self.assertEqual(0, pygame.key_stop_count)
+
+        inside_click = types.SimpleNamespace(type=pygame.MOUSEBUTTONDOWN, pos=(10, 10))
+        outside_click = types.SimpleNamespace(type=pygame.MOUSEBUTTONDOWN, pos=(300, 300))
+        text_input.handle_event(inside_click)
+        text_input.handle_event(outside_click)
+
+        self.assertFalse(text_input.active)
+        self.assertEqual(1, pygame.key_start_count)
+        self.assertEqual(1, pygame.key_stop_count)
+        self.assertEqual([text_input.rect], pygame.text_input_rects)
+
     def test_ui_font_uses_os_specific_japanese_font_candidates(self):
         pygame = install_fake_pygame()
 
@@ -349,10 +564,116 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual((get_japanese_font_candidates("Windows"), False, False), font_module.match_calls[0])
         self.assertEqual([("/system/japanese-ui.ttf", 25)], font_module.font_calls)
 
+    def test_ui_font_prefers_os_font_file_before_match_font(self):
+        install_fake_pygame()
+        from game.UIFont import get_japanese_font_file_candidates
+        from game.UIFont import resolve_japanese_font_path
+
+        darwin_paths = get_japanese_font_file_candidates("Darwin")
+
+        def path_exists(path):
+            return path == darwin_paths[0]
+
+        def fail_match_font(names, bold=False, italic=False):
+            raise AssertionError("OS 固定フォントファイルがある場合は match_font まで進まない")
+
+        self.assertIn("/System/Library/Fonts/", darwin_paths[0])
+        self.assertEqual(darwin_paths[0], resolve_japanese_font_path("Darwin", path_exists, fail_match_font))
+
+    def test_text_input_environment_does_not_force_linux_ime_module_on_macos(self):
+        from game.TextInputEnvironment import configure_text_input_environment
+
+        mac_env = {"SDL_IM_MODULE": "fcitx"}
+        linux_env = {}
+
+        configure_text_input_environment(platform_name="Darwin", environ=mac_env)
+        configure_text_input_environment(platform_name="Linux", environ=linux_env)
+
+        self.assertNotIn("SDL_IM_MODULE", mac_env)
+        self.assertEqual("fcitx", linux_env["SDL_IM_MODULE"])
+
     def test_normalize_text_applies_nfkc_before_lowercase(self):
         from inference.TextUtils import normalize_text
 
         self.assertEqual("abchpポーション", normalize_text("ＡＢＣ　HP、ポーション。"))
+
+    def test_train_text_classifier_uses_ruri_topic_embeddings(self):
+        from inference.TextClassifier import RURI_CLASSIFICATION_PREFIX
+        from inference.TextClassifier import train_text_classifier
+
+        class FakeEmbeddingBackend:
+            def __init__(self):
+                self.encode_calls = []
+
+            def encode(self, texts, batch_size=None):
+                self.encode_calls.append((list(texts), batch_size))
+                return [[float(len(text)), float(index)] for index, text in enumerate(texts)]
+
+        class FakeLabelClassifier:
+            def __init__(self):
+                self.fit_embeddings = None
+                self.fit_labels = None
+
+            def fit(self, embeddings, labels):
+                self.fit_embeddings = embeddings
+                self.fit_labels = list(labels)
+                return self
+
+            def predict(self, embeddings):
+                return [1 for _embedding in embeddings]
+
+        embedding_backend = FakeEmbeddingBackend()
+        label_classifier = FakeLabelClassifier()
+
+        classifier = train_text_classifier(
+            ["打死", "スライムへ移動"],
+            [1, 0],
+            embedding_backend=embedding_backend,
+            label_classifier=label_classifier,
+        )
+
+        self.assertIs(label_classifier, classifier.label_classifier)
+        self.assertEqual(
+            [RURI_CLASSIFICATION_PREFIX + "打死", RURI_CLASSIFICATION_PREFIX + "スライムへ移動"],
+            embedding_backend.encode_calls[0][0],
+        )
+        self.assertEqual(32, embedding_backend.encode_calls[0][1])
+        self.assertEqual([[8.0, 0.0], [13.0, 1.0]], label_classifier.fit_embeddings)
+        self.assertEqual([1, 0], label_classifier.fit_labels)
+
+    def test_predict_label_id_uses_ruri_embedding_classifier(self):
+        from inference.TextClassifier import RURI_CLASSIFICATION_PREFIX
+        from inference.TextClassifier import RuriEmbeddingTextClassifier
+        from inference.TextClassifier import predict_label_id
+
+        class FakeEmbeddingBackend:
+            def __init__(self):
+                self.encode_calls = []
+
+            def encode(self, texts, batch_size=None):
+                self.encode_calls.append((list(texts), batch_size))
+                return [[10.0, 20.0] for _text in texts]
+
+        class FakeLabelClassifier:
+            def __init__(self):
+                self.predict_embeddings = None
+
+            def predict(self, embeddings):
+                self.predict_embeddings = embeddings
+                return [1]
+
+        embedding_backend = FakeEmbeddingBackend()
+        label_classifier = FakeLabelClassifier()
+        classifier = RuriEmbeddingTextClassifier(
+            embedding_backend=embedding_backend,
+            label_classifier=label_classifier,
+        )
+
+        label_id = predict_label_id(classifier, "打倒")
+
+        self.assertEqual(1, label_id)
+        self.assertEqual([RURI_CLASSIFICATION_PREFIX + "打倒"], embedding_backend.encode_calls[0][0])
+        self.assertEqual([[10.0, 20.0]], label_classifier.predict_embeddings)
 
     def test_voice_input_records_transcribes_and_exposes_status(self):
         from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VOICE_STATE_IDLE, VOICE_STATE_RECORDING
@@ -411,6 +732,33 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
         self.assertEqual("認識: ABC123ポーション", voice_input.get_status_text())
 
+    def test_voice_input_prints_recognized_text_once_for_debug(self):
+        from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
+
+        class FakeRecorder:
+            def start(self):
+                pass
+
+            def stop_to_wav_file(self):
+                return "debug.wav"
+
+        class FakeTranscriber:
+            def transcribe(self, audio_path):
+                return "ゴブリンを倒して"
+
+        voice_input = VoiceInput(recorder=FakeRecorder(), transcriber=FakeTranscriber())
+        stdout_buffer = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout_buffer):
+            self.assertTrue(voice_input.start_recording())
+            self.assertTrue(voice_input.stop_recording_and_transcribe())
+            self.assertTrue(voice_input.wait_for_pending_transcription(timeout_seconds=1.0))
+        event = voice_input.poll_event()
+
+        self.assertEqual(VOICE_EVENT_RECOGNIZED_TEXT, event.kind)
+        self.assertEqual("ゴブリンを倒して", event.text)
+        self.assertEqual(1, stdout_buffer.getvalue().count("音声認識結果: ゴブリンを倒して"))
+
     def test_voice_input_reports_transcription_error_without_text_event(self):
         from game.VoiceInput import VOICE_EVENT_ERROR, VOICE_STATE_IDLE, VoiceInput
 
@@ -438,6 +786,87 @@ class GameRegressionTests(unittest.TestCase):
         self.assertIsNone(event.text)
         self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
         self.assertIn("音声入力エラー: モデルなし", voice_input.get_status_text())
+
+    def test_faster_whisper_transcriber_uses_fast_short_command_options(self):
+        fake_faster_whisper = types.ModuleType("faster_whisper")
+        model_calls = []
+        transcribe_calls = []
+
+        class FakeWhisperModel:
+            def __init__(self, model_size, device=None, compute_type=None):
+                model_calls.append((model_size, device, compute_type))
+
+            def transcribe(self, audio_path, **kwargs):
+                transcribe_calls.append((audio_path, kwargs))
+                return [types.SimpleNamespace(text=" 倒して ")], object()
+
+        fake_faster_whisper.WhisperModel = FakeWhisperModel
+        sys.modules["faster_whisper"] = fake_faster_whisper
+
+        from game.VoiceInput import DEFAULT_MAX_TRANSCRIPTION_SECONDS, DEFAULT_WHISPER_MODEL_SIZE
+        from game.VoiceInput import FasterWhisperTranscriber
+
+        transcriber = FasterWhisperTranscriber()
+        text = transcriber.transcribe("voice.wav")
+
+        self.assertEqual("tiny", DEFAULT_WHISPER_MODEL_SIZE)
+        self.assertEqual(120.0, DEFAULT_MAX_TRANSCRIPTION_SECONDS)
+        self.assertEqual("倒して", text)
+        self.assertEqual([("tiny", "cpu", "int8")], model_calls)
+        self.assertEqual("voice.wav", transcribe_calls[0][0])
+        self.assertEqual("ja", transcribe_calls[0][1]["language"])
+        self.assertEqual(1, transcribe_calls[0][1]["beam_size"])
+        self.assertFalse(transcribe_calls[0][1]["vad_filter"])
+
+    def test_voice_input_timeout_releases_state_and_ignores_stale_result(self):
+        from game.VoiceInput import VOICE_EVENT_ERROR, VOICE_STATE_IDLE, VOICE_STATE_TRANSCRIBING
+        from game.VoiceInput import VoiceInput
+
+        current_time = {"value": 0.0}
+        transcription_started = threading.Event()
+        continue_transcription = threading.Event()
+
+        class FakeRecorder:
+            def __init__(self):
+                self.start_count = 0
+
+            def start(self):
+                self.start_count += 1
+
+            def stop_to_wav_file(self):
+                return "late.wav"
+
+        class HangingTranscriber:
+            def transcribe(self, audio_path):
+                transcription_started.set()
+                continue_transcription.wait(timeout=1.0)
+                return "倒して"
+
+        recorder = FakeRecorder()
+        voice_input = VoiceInput(
+            recorder=recorder,
+            transcriber=HangingTranscriber(),
+            max_transcription_seconds=0.5,
+            clock=lambda: current_time["value"],
+        )
+
+        self.assertTrue(voice_input.start_recording())
+        self.assertTrue(voice_input.stop_recording_and_transcribe())
+        self.assertTrue(transcription_started.wait(timeout=1.0))
+        self.assertEqual(VOICE_STATE_TRANSCRIBING, voice_input.state)
+
+        current_time["value"] = 1.0
+        event = voice_input.poll_event()
+
+        self.assertEqual(VOICE_EVENT_ERROR, event.kind)
+        self.assertIn("タイムアウト", event.message)
+        self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
+        self.assertTrue(voice_input.start_recording())
+        self.assertEqual(2, recorder.start_count)
+
+        continue_transcription.set()
+        self.assertTrue(voice_input.wait_for_pending_transcription(timeout_seconds=1.0))
+        self.assertIsNone(voice_input.poll_event())
 
     def test_eval_reuses_loaded_category_model(self):
         load_count = {"model": 0}
@@ -599,6 +1028,216 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual(1, game.voice_input.started)
         self.assertEqual(1, game.voice_input.stopped)
         self.assertEqual(["スライムへ移動"], game.eval_calls)
+
+    def test_voice_combat_command_without_name_targets_nearest_monster(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.combat
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+        from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInputEvent
+
+        class FakeVoiceInput:
+            def __init__(self):
+                self.events = [VoiceInputEvent(kind=VOICE_EVENT_RECOGNIZED_TEXT, text="倒して")]
+
+            def poll_event(self):
+                if len(self.events) == 0:
+                    return None
+                return self.events.pop(0)
+
+        near_monster = types.SimpleNamespace(name="スライム", x=3, y=4, position=(3, 4), alive=True)
+        far_monster = types.SimpleNamespace(name="ゴブリン", x=100, y=100, position=(100, 100), alive=True)
+        game = Game.__new__(Game)
+        game.voice_input = FakeVoiceInput()
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [far_monster, near_monster]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            game.consume_voice_input_events()
+
+        self.assertIs(near_monster, game.player.target)
+        self.assertEqual("combat", game.player.action_type)
+
+    def test_combat_command_with_missing_named_target_does_not_fallback_to_nearest_monster(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.combat
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        slime = types.SimpleNamespace(name="スライム", x=3, y=4, position=(3, 4), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [slime]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("ゴブリンを倒して")
+
+        self.assertFalse(result)
+        self.assertIsNone(game.player.target)
+        self.assertIsNone(game.player.action_type)
+        self.assertEqual("ゴブリンがマップにいませんでした。", game.action_result.rendered_text)
+
+    def test_combat_command_with_similar_spoken_target_uses_best_alive_monster_match(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.combat
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        goblin = types.SimpleNamespace(name="ゴブリン", x=100, y=100, position=(100, 100), alive=True)
+        slime = types.SimpleNamespace(name="スライム", x=3, y=4, position=(3, 4), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [slime, goblin]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("オフリングを倒せ")
+
+        self.assertTrue(result)
+        self.assertIs(goblin, game.player.target)
+        self.assertEqual("combat", game.player.action_type)
+
+    def test_combat_command_with_low_similarity_target_does_not_attack_nearest_monster(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.combat
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        goblin = types.SimpleNamespace(name="ゴブリン", x=3, y=4, position=(3, 4), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [goblin]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("ドラゴンを倒せ")
+
+        self.assertFalse(result)
+        self.assertIsNone(game.player.target)
+        self.assertIsNone(game.player.action_type)
+        self.assertEqual("ドラゴンがマップにいませんでした。", game.action_result.rendered_text)
+
+    def test_combat_command_with_generic_target_uses_nearest_monster(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.combat
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        near_monster = types.SimpleNamespace(name="スライム", x=3, y=4, position=(3, 4), alive=True)
+        far_monster = types.SimpleNamespace(name="ゴブリン", x=100, y=100, position=(100, 100), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [far_monster, near_monster]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("敵を倒して")
+
+        self.assertTrue(result)
+        self.assertIs(near_monster, game.player.target)
+        self.assertEqual("combat", game.player.action_type)
 
     def test_game_renders_voice_input_status(self):
         install_fake_pygame()

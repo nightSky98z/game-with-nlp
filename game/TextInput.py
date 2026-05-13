@@ -1,10 +1,6 @@
 import pygame
-import sys
-import os
 from inference.TextUtils import normalize_ascii_width
 from game.UIFont import create_ui_font
-
-os.environ['SDL_IM_MODULE'] = 'fcitx'
 
 class TextInput:
     def __init__(self, x, y, width, height):
@@ -21,24 +17,33 @@ class TextInput:
 
         # IME入力用
         self.composition = ""
-        pygame.key.start_text_input()
-        pygame.key.set_text_input_rect(self.rect)
+        self.submitted_composition_text = ""
+        self.submitted_full_text = ""
 
     def handle_event(self, event, game_object=None):
         # マウスクリックの処理
         if event.type == pygame.MOUSEBUTTONDOWN:
             if self.rect.collidepoint(event.pos):
                 self.active = True
+                pygame.key.start_text_input()
                 pygame.key.set_text_input_rect(self.rect)
             else:
                 self.active = False
+                pygame.key.stop_text_input()
             self.color = self.color_active if self.active else self.color_inactive
 
         # キー入力の処理
         if self.active:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
-                    submitted_text = normalize_ascii_width(self.text)
+                    # macOS IME は確定前 composition を描画には渡すが、Return の順序によって TEXTINPUT が来ないことがある。
+                    submitted_text = normalize_ascii_width(self.text + self.composition)
+                    submitted_composition_text = normalize_ascii_width(self.composition)
+                    if submitted_composition_text != "":
+                        self.submitted_composition_text = submitted_composition_text
+                        self.submitted_full_text = submitted_text
+                    else:
+                        self.clear_submitted_text_guard()
                     print(submitted_text)
                     if game_object is not None:
                         game_object.nlp_text = submitted_text
@@ -50,12 +55,48 @@ class TextInput:
 
             elif event.type == pygame.TEXTINPUT:
                 # IME確定後の入力は、表示と送信の境界で英数字の幅だけ揃える。
-                self.text += normalize_ascii_width(event.text)
+                input_text = normalize_ascii_width(event.text)
+                if self.should_ignore_textinput_after_submit(input_text):
+                    self.clear_submitted_text_guard()
+                    return ""
+                self.clear_submitted_text_guard()
+                self.text += input_text
+                self.composition = ""
 
             elif event.type == pygame.TEXTEDITING:
                 # IME入力中のテキスト
                 self.composition = normalize_ascii_width(event.text)
         return ""
+
+    def should_ignore_textinput_after_submit(self, input_text):
+        """Return 送信直後に IME が遅れて返す確定文字列か判定する。
+
+        Params:
+        - input_text: `TEXTINPUT` から来た正規化済み文字列。
+
+        Returns:
+        - `True`: 直前の Return で送信済みの composition/full text と同じなので入力欄へ戻さない。
+        - `False`: 通常の新規入力として扱う。
+
+        Caller:
+        - Return 送信時に `submitted_composition_text` と `submitted_full_text` を保存してから呼ぶ。
+        """
+        if input_text == "":
+            return False
+        if self.submitted_composition_text != "" and input_text == self.submitted_composition_text:
+            return True
+        if self.submitted_full_text != "" and input_text == self.submitted_full_text:
+            return True
+        return False
+
+    def clear_submitted_text_guard(self):
+        """Return 後の IME 後追い commit を 1 回だけ判定する状態を消す。
+
+        Caller:
+        - `TEXTINPUT` を処理した後に呼ぶ。guard を残し続けると次の同じ文字列入力を誤って捨てる。
+        """
+        self.submitted_composition_text = ""
+        self.submitted_full_text = ""
 
     def draw(self, screen):
         # テキストを描画
