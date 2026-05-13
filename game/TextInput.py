@@ -2,6 +2,7 @@ import pygame
 import sys
 import os
 from inference.TextUtils import normalize_ascii_width
+from game.UIFont import create_ui_font
 
 os.environ['SDL_IM_MODULE'] = 'fcitx'
 
@@ -12,11 +13,7 @@ class TextInput:
         self.text = ""
         self.active = False # 入力ボックスのアクティブ状態
 
-        try:
-            self.font = pygame.font.SysFont("notosansmonocjkjp", 24)
-        except:
-            print("Warninig: Japanese font not found. Using default font.")
-            self.font = pygame.font.Font(None, 24)
+        self.font = create_ui_font(24)
 
         self.color_inactive = pygame.Color('lightskyblue3')
         self.color_active = pygame.Color('dodgerblue2')
