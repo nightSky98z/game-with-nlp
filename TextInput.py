@@ -1,6 +1,7 @@
 import pygame
 import sys
 import os
+from TextUtils import normalize_ascii_width
 
 os.environ['SDL_IM_MODULE'] = 'fcitx'
 
@@ -26,7 +27,7 @@ class TextInput:
         pygame.key.start_text_input()
         pygame.key.set_text_input_rect(self.rect)
 
-    def handle_event(self, event, game_object):
+    def handle_event(self, event, game_object=None):
         # マウスクリックの処理
         if event.type == pygame.MOUSEBUTTONDOWN:
             if self.rect.collidepoint(event.pos):
@@ -40,19 +41,24 @@ class TextInput:
         if self.active:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
-                    print(self.text)
-                    game_object.nlp_text = self.text
+                    submitted_text = normalize_ascii_width(self.text)
+                    print(submitted_text)
+                    if game_object is not None:
+                        game_object.nlp_text = submitted_text
                     self.text = ""
+                    self.composition = ""
+                    return submitted_text
                 elif event.key == pygame.K_BACKSPACE:
                     self.text = self.text[:-1]
 
             elif event.type == pygame.TEXTINPUT:
-                # 通常の文字入力
-                self.text += event.text
+                # IME確定後の入力は、表示と送信の境界で英数字の幅だけ揃える。
+                self.text += normalize_ascii_width(event.text)
 
             elif event.type == pygame.TEXTEDITING:
                 # IME入力中のテキスト
-                self.composition = event.text
+                self.composition = normalize_ascii_width(event.text)
+        return ""
 
     def draw(self, screen):
         # テキストを描画

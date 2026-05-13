@@ -1,6 +1,6 @@
 from Sprite import Sprite
 from GameUtils import BOX_POSITION, ITEM_SHOW_COUNT_OFFSET
-from Color import WHITE
+from Color import BLUE, RED, WHITE
 
 HP_POTION_PATH = "./resources/hp_potion.png"
 MP_POTION_PATH = "./resources/mp_potion.png"
@@ -37,7 +37,7 @@ class Item:
 class HP_Potion(Item):
     def __init__(self, name="HPポーション", sprite=None, count=1, value=10):
         if sprite is None:
-            sprite = Sprite(HP_POTION_PATH, 0, 0, DEFAULT_ITEM_SPRITE_SIZE)
+            sprite = Sprite(HP_POTION_PATH, 0, 0, DEFAULT_ITEM_SPRITE_SIZE, fallback_color=RED)
         super().__init__(name, sprite, count)
         self.value = value
 
@@ -62,7 +62,7 @@ class HP_Potion(Item):
 class MP_Potion(Item):
     def __init__(self, name="MPポーション", sprite=None, count=1, value=10):
         if sprite is None:
-            sprite = Sprite(MP_POTION_PATH, 0, 0, DEFAULT_ITEM_SPRITE_SIZE)
+            sprite = Sprite(MP_POTION_PATH, 0, 0, DEFAULT_ITEM_SPRITE_SIZE, fallback_color=BLUE)
         super().__init__(name, sprite, count)
         self.value = value
 

@@ -70,7 +70,7 @@ class Character(ABC):
 class Player(Character):
     def __init__(self, x, y, game, sprite_sheet=None, name="player"):
         if sprite_sheet is None:
-            self.sprite_sheet = SpriteSheet(player_sprites)
+            self.sprite_sheet = SpriteSheet(player_sprites, fallback_color=WHITE)
         else:
             self.sprite_sheet = sprite_sheet
         self.sprite = self.sprite_sheet.get_image(96, 0, 16, 16)
@@ -122,15 +122,16 @@ class Player(Character):
                     # spriteの位置を修正
                     self.game_.all_sprites.add(item.sprite)
                     self.item_box[idx] = item
-                    break
+                    print(f"{item.name}をゲットしました。(所持数: {item.count})")
+                    # nlpの評価が画面に表示させる
+                    txt = f"{item.name}をゲットしました。(所持数: {item.count})"
+                    self.game_.action_result = self.game_.nlp_result_font.render(txt, True, WHITE)
+                    return True
 
-            print(f"{item.name}をゲットしました。(所持数: {item.count})")
-            # nlpの評価が画面に表示させる
-            txt = f"{item.name}をゲットしました。(所持数: {item.count})"
+            print('ボックスがいっぱいです。')
+            txt = 'ボックスがいっぱいです。'
             self.game_.action_result = self.game_.nlp_result_font.render(txt, True, WHITE)
-            return True
-        # 追加できなかった場合
-        return False
+            return False
 
     def use(self, index):
         try:
@@ -160,12 +161,14 @@ class Player(Character):
                     print('購入が成功しました。')
                     txt = '購入が成功しました。'
                     self.game_.action_result = self.game_.nlp_result_font.render(txt, True, WHITE)
+                    return True
                 else:
                     print('ボックスがいっぱいです。')
                     txt = 'ボックスがいっぱいです。'
                     self.game_.action_result = self.game_.nlp_result_font.render(txt, True, WHITE)
-        else:
+                    return False
             return False
+        return False
 
     def check_hp_limit(self):
         if self.hp > self.hp_max:
@@ -251,12 +254,12 @@ class Monster(Character):
 class Goblin(Monster):
     def __init__(self, x, y, game, sprite_sheet=None, name="ゴブリン"):
         if sprite_sheet is None:
-            sprite_sheet = SpriteSheet(orc_idle_full)
+            sprite_sheet = SpriteSheet(orc_idle_full, fallback_color=RED)
         super().__init__(x, y, game, sprite_sheet, name)
 
 
 class Slime(Monster):
     def __init__(self, x, y, game, sprite_sheet=None, name="スライム"):
         if sprite_sheet is None:
-            sprite_sheet = SpriteSheet(slime_sprites)
+            sprite_sheet = SpriteSheet(slime_sprites, fallback_color=RED)
         super().__init__(x, y, game, sprite_sheet, name)

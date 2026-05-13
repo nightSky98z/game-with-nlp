@@ -1,12 +1,20 @@
-from enum import Enum
+from TextClassifier import TextClassifierError
+from TextClassifier import load_text_classifier
+from TextClassifier import predict_label_id
+from TextUtils import normalize_text
 
-from transformers import BertForSequenceClassification, BertJapaneseTokenizer
-from transformers.hf_argparser import DataClass
-import torch
 
-MODEL_NAME = 'cl-tohoku/bert-base-japanese-whole-word-masking'
+MODEL1_PATH = "./model1_sklearn.joblib"
+MODEL2_PATH = "./model2_sklearn.joblib"
 
-#class Category(Enum):
+_model_cache = {}
+
+
+class ModelLoadError(RuntimeError):
+    """NLP 推論モデルまたは依存ライブラリを読み込めない状態。"""
+
+
+# class Category(Enum):
 movement = 0
 combat = 1
 take = 2
@@ -15,62 +23,86 @@ find = 4
 buy = 5
 unknown = 6
 
-#class ObjectType(Enum):
+# class ObjectType(Enum):
 map = 0
 box = 1
 
-def eval(text_list, label_list, model, tokenizer):
-    encoding = tokenizer(
-        text_list,
-        padding='longest',
-        return_tensors='pt'
-    )
-    encoding = { k: v for k, v in encoding.items()}
-    labels = torch.tensor(label_list)
-    with torch.no_grad():
-        output = model.forward(**encoding)
-    scores = output.logits
-    labels_predicted = scores.argmax(-1)
-    num_correct = (labels_predicted==labels).sum().item()
-    accuracy = num_correct/labels.size(0)
 
-    print('size:')
-    print(scores.size())
-    print('predicted labels:')
+def _get_model(model_path):
+    """保存済み軽量分類器を遅延ロードしてキャッシュする。
+
+    引数:
+        model_path: `Model1.py` または `Model2.py` が保存した joblib ファイル。
+
+    戻り値:
+        `predict` を持つ学習済み分類器。
+
+    例外:
+        ModelLoadError: 依存ライブラリまたはモデルファイルを読み込めない。
+    """
+    if model_path in _model_cache:
+        return _model_cache[model_path]
+    try:
+        model = load_text_classifier(model_path)
+    except TextClassifierError as err:
+        raise ModelLoadError(str(err)) from err
+    _model_cache[model_path] = model
+    return model
+
+
+def predict_category(text: str) -> int:
+    """入力テキストを行動カテゴリ ID に分類する。
+
+    引数:
+        text: ゲーム UI または ASR から渡される未正規化文字列。
+
+    戻り値:
+        `movement` / `combat` などの整数ラベル ID。
+
+    例外:
+        ModelLoadError: `model1_sklearn.joblib` を読み込めない。
+    """
+    model = _get_model(MODEL1_PATH)
+    return predict_label_id(model, text)
+
+
+def predict_type(text: str) -> int:
+    """入力テキストを対象タイプ ID に分類する。
+
+    引数:
+        text: ゲーム UI または ASR から渡される未正規化文字列。
+
+    戻り値:
+        `map` または `box` の整数ラベル ID。
+
+    例外:
+        ModelLoadError: `model2_sklearn.joblib` を読み込めない。
+    """
+    model = _get_model(MODEL2_PATH)
+    return predict_label_id(model, text)
+
+
+def eval(text_list, label_list, model):
+    """分類器の予測結果と正解ラベルから accuracy を表示する。
+
+    引数:
+        text_list: 未正規化テキスト配列。
+        label_list: `text_list` と同じ順序の整数ラベル配列。
+        model: `predict` を持つ学習済み分類器。
+
+    戻り値:
+        `model.predict` が返した予測ラベル配列。
+    """
+    normalized_texts = [normalize_text(text) for text in text_list]
+    labels_predicted = model.predict(normalized_texts)
+    num_correct = sum(int(predicted) == int(label) for predicted, label in zip(labels_predicted, label_list))
+    accuracy = num_correct / len(label_list)
+
+    print("predicted labels:")
     print(labels_predicted)
-    print('accuracy:')
+    print("accuracy:")
     print(accuracy)
     return labels_predicted
-
-
-def predict_category(text):
-    bert_sc_category = BertForSequenceClassification.from_pretrained('./model1_transformers')
-    tokenizer = BertJapaneseTokenizer.from_pretrained(MODEL_NAME)
-    encoding = tokenizer(
-        text,
-        padding='longest',
-        return_tensors='pt'
-    )
-    with torch.no_grad():
-        output_category = bert_sc_category.forward(**encoding)
-    scores_category = output_category.logits
-    label_predicted_category = scores_category.argmax(-1)
-    return label_predicted_category
-
-
-def predict_type(text):
-    bert_sc_type = BertForSequenceClassification.from_pretrained('./model2_transformers')
-    tokenizer = BertJapaneseTokenizer.from_pretrained(MODEL_NAME)
-    encoding = tokenizer(
-        text,
-        padding='longest',
-        return_tensors='pt'
-    )
-    with torch.no_grad():
-        output_type = bert_sc_type.forward(**encoding)
-    scores_type = output_type.logits
-    label_predicted_type = scores_type.argmax(-1)
-    return label_predicted_type
 
 
 def main():
@@ -81,7 +113,7 @@ def main():
         movement,
         unknown,
         buy,
-        use
+        use,
     ]
 
     label_list2 = [
@@ -90,14 +122,14 @@ def main():
         map,
         map,
         map,
-        box
+        box,
     ]
-    bert_sc1 = BertForSequenceClassification.from_pretrained('./model1_transformers')
-    bert_sc2 = BertForSequenceClassification.from_pretrained('./model2_transformers')
-    tokenizer = BertJapaneseTokenizer.from_pretrained(MODEL_NAME)
-    eval(text_list, label_list1, bert_sc1, tokenizer)
-    print('-----------------------------')
-    eval(text_list, label_list2, bert_sc2, tokenizer)
+    category_model = _get_model(MODEL1_PATH)
+    type_model = _get_model(MODEL2_PATH)
+    eval(text_list, label_list1, category_model)
+    print("-----------------------------")
+    eval(text_list, label_list2, type_model)
+
 
 if __name__ == "__main__":
     main()

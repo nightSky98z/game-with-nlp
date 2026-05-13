@@ -1,15 +1,30 @@
 import pygame
 
 class SpriteSheet:
-    def __init__(self, filename):
-        self.sprite_sheet = pygame.image.load(filename)
+    """スプライトシート画像、または欠落時の矩形代替を保持する。
+
+    引数:
+        filename: 読み込み対象の画像パス。
+        fallback_color: 画像が存在しない場合に生成する矩形の色。
+
+    呼び出し側:
+        `get_image` の返す Surface は呼び出し側が描画位置を管理する。
+    """
+
+    def __init__(self, filename, fallback_color=(255, 0, 0)):
+        self.filename = filename
+        self.fallback_color = fallback_color
+        try:
+            self.sprite_sheet = pygame.image.load(filename).convert_alpha()
+        except (pygame.error, FileNotFoundError):
+            self.sprite_sheet = None
 
     def get_image(self, x, y, width, height):
-        # 空のサーフェス
         image = pygame.Surface([width, height])
-        # 透明な背景を設定
+        if self.sprite_sheet is None:
+            image.fill(self.fallback_color)
+            return image
         image.set_colorkey((0, 0, 0))
-        # スプライトシートから画像を切り出してコピー
         image.blit(self.sprite_sheet, (0, 0), (x, y, width, height))
         return image
 

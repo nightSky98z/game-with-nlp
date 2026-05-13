@@ -1,6 +1,5 @@
 import sys
 import os
-import unicodedata
 import pygame
 from typing import List
 from enum import Enum
@@ -19,9 +18,24 @@ import eval
 from GameConfig import GameConfig
 from Character import Goblin
 from Character import Slime
+from TextUtils import normalize_text
 
 class Game:
     """ゲームのメインクラス"""
+
+    potion_choice_specs = {
+        HP_Potion: {
+            "name": "HPポーション",
+            "aliases": ("hp", "hpポーション", "hp薬"),
+        },
+        MP_Potion: {
+            "name": "MPポーション",
+            "aliases": ("mp", "mpポーション", "mp薬"),
+        },
+    }
+    generic_potion_aliases = ("ポーション", "薬")
+    # 選択待ち中だけ、短い入力の選択子と数量を記号でも分けられるようにする。
+    pending_choice_separator_pattern = r"[\s,;/、，；／]+"
 
     def __init__(self) -> None:
         """ゲームの初期化"""
@@ -58,6 +72,7 @@ class Game:
         self.text_input_box = TextInput(100, 550, 200, 50)
         self.nlp_text = ""
         self.start_eval = False
+        self.pending_choice = None
 
     def setup_characters(self) -> None:
         """キャラクターの初期設定"""
@@ -178,20 +193,30 @@ class Game:
 # nlp部分
     def eval_text(self, text):
         """入力されたテキストをモデルで評価"""
-        self.eval_init()
         self.start_eval = True
+        if getattr(self, "pending_choice", None) is not None:
+            return self.resolve_pending_choice(text)
+
+        self.eval_init()
         if text == None or text == "":
             return
         text = self.text_preprocess(text)
-        label_category = eval.predict_category(text)
-        label_type = eval.predict_type(text)
+        try:
+            label_category = eval.predict_category(text)
+            label_type = eval.predict_type(text)
+        except eval.ModelLoadError as err:
+            txt = f"NLPモデルを読み込めません: {err}"
+            print(txt)
+            self.eval_result = self.nlp_result_font.render("NLPモデル読み込み失敗", True, Color.WHITE)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            return False
 
         category_message = ""
         type_message = ""
         categories = ["移動", "戦闘", "採取", "使用", "捜索", "購入", "未知"]
         types = ["マップ", "ボックス"]
-        label_category = label_category[0].item()
-        label_type = label_type[0].item()
+        label_category = int(label_category)
+        label_type = int(label_type)
         category_message = categories[label_category]
         type_message = types[label_type]
         print("category:", category_message, "type:", type_message)
@@ -238,10 +263,14 @@ class Game:
             if self.buy_item_with_eval(text, item, name_list):
                 return True
 
-            name_list = ['hp', 'hpポーション', 'ポーション', 'hp薬', '薬']
+            name_list = ['hp', 'hpポーション', 'hp薬']
             item = HP_Potion
             if self.buy_item_with_eval(text, item, name_list):
                 return True
+
+            if self.has_generic_potion_alias(text):
+                choices = self.get_shop_potion_choices()
+                return self.start_pending_choice("buy", choices)
 
             print('このオブジェクトは購入できません。')
             txt = 'このオブジェクトは購入できません。'
@@ -273,7 +302,7 @@ class Game:
                 self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
                 return False
 
-            name_list = ['hp', 'hpポーション', 'ポーション', 'hp薬', '薬']
+            name_list = ['hp', 'hpポーション', 'hp薬']
             item = HP_Potion
             if self.use_position_with_eval(text, item, name_list):
                 return True
@@ -283,6 +312,10 @@ class Game:
                 print(txt)
                 self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
                 return False
+
+            if self.has_generic_potion_alias(text):
+                choices = self.get_player_potion_choices()
+                return self.start_pending_choice("use", choices)
 
             txt = '使用できません。'
             print(txt)
@@ -340,12 +373,186 @@ class Game:
         self.player.action_type = None
 
     def text_preprocess(self, text):
-        new_text = unicodedata.normalize("NFKC", text)  # 全角を半角へ
-        new_text = text.lower()  # 英字は小文字へ
-        new_text = re.sub(' ', '', new_text)  # 半角スペース削除
-        new_text = re.sub('　', '', new_text)  # 全角スペース削除
-        new_text = re.sub(r'[、，。,.]+', '', new_text)
-        return new_text
+        return normalize_text(text)
+
+    def has_generic_potion_alias(self, text):
+        normalized_text = self.text_preprocess(text)
+        for alias in self.generic_potion_aliases:
+            if alias in normalized_text:
+                return True
+        return False
+
+    def make_potion_choice(self, item_type, box_index=None, count=None):
+        spec = self.potion_choice_specs[item_type]
+        choice = {
+            "item_type": item_type,
+            "name": spec["name"],
+            "aliases": spec["aliases"],
+        }
+        if box_index is not None:
+            choice["box_index"] = box_index
+        if count is not None:
+            choice["count"] = count
+        return choice
+
+    def get_shop_potion_choices(self):
+        choices = []
+        shop = getattr(self, "current_shop", self.shop)
+        for item_type in shop.item_type_list:
+            if item_type in self.potion_choice_specs:
+                choices.append(self.make_potion_choice(item_type))
+        return choices
+
+    def get_player_potion_choices(self):
+        choices = []
+        seen_item_types = set()
+        for idx, item in enumerate(self.player.item_box):
+            if isinstance(item, Item) and type(item) in self.potion_choice_specs:
+                if type(item) in seen_item_types:
+                    continue
+                choices.append(self.make_potion_choice(type(item), box_index=idx, count=item.count))
+                seen_item_types.add(type(item))
+        return choices
+
+    def build_choice_prompt(self, action, choices):
+        action_text = "買います" if action == "buy" else "使います"
+        parts = [f"{idx + 1}: {choice['name']}" for idx, choice in enumerate(choices)]
+        return f"どのポーションを{action_text}か？ " + " ".join(parts)
+
+    def start_pending_choice(self, action, choices):
+        """曖昧なポーション対象を次の入力で解決するために保持する。
+
+        引数:
+            action: `buy` または `use`。次入力で実行する操作を表す。
+            choices: 選択肢配列。各要素は item type、表示名、alias、必要なら box index を持つ。
+
+        戻り値:
+            選択待ちに入った場合は false。候補がない場合も false。
+
+        呼び出し側:
+            次の `eval_text` は通常分類ではなく `resolve_pending_choice` へ渡される。
+        """
+        self.nlp_text = ""
+        if len(choices) == 0:
+            txt = "購入できるポーションがありません。" if action == "buy" else "使用できるポーションがありません。"
+            print(txt)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            self.pending_choice = None
+            return False
+
+        self.pending_choice = {
+            "action": action,
+            "choices": choices,
+        }
+        txt = self.build_choice_prompt(action, choices)
+        print(txt)
+        self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+        return False
+
+    def resolve_pending_choice(self, text):
+        """選択待ち中の入力を番号または名前と数量として解決する。
+
+        引数:
+            text: `2 2`、`2,2`、`mp/2`、`HPポーション;1` のような選択入力。
+
+        戻り値:
+            有効な選択を実行できた場合は true。不正入力または実行失敗は false。
+
+        呼び出し側:
+            不正入力では `pending_choice` を維持するため、次入力で再選択できる。
+        """
+        self.nlp_text = ""
+        self.player.target = None
+        self.player.action_type = None
+        pending_choice = self.pending_choice
+        choice, count = self.parse_pending_choice_input(text, pending_choice["choices"])
+        if choice is None or count < 1:
+            txt = "選択できません。 " + self.build_choice_prompt(pending_choice["action"], pending_choice["choices"])
+            print(txt)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            return False
+
+        self.pending_choice = None
+        if pending_choice["action"] == "buy":
+            return self.execute_pending_buy(choice, count)
+        if pending_choice["action"] == "use":
+            return self.execute_pending_use(choice, count)
+        return False
+
+    def parse_pending_choice_input(self, text, choices):
+        tokens = self.split_pending_choice_tokens(text)
+        if len(tokens) == 0:
+            return None, 0
+
+        choice_token = tokens[0]
+        count = 1
+        if len(tokens) >= 2 and tokens[1].isdigit():
+            count = int(tokens[1])
+
+        if choice_token.isdigit():
+            choice_index = int(choice_token) - 1
+            if 0 <= choice_index < len(choices):
+                return choices[choice_index], count
+            return None, count
+
+        for choice in choices:
+            aliases = [self.text_preprocess(alias) for alias in choice["aliases"]]
+            if choice_token == self.text_preprocess(choice["name"]) or choice_token in aliases:
+                return choice, count
+        return None, count
+
+    def split_pending_choice_tokens(self, text):
+        """選択待ち入力を選択子と数量のトークンに分割する。
+
+        Params:
+        - text: プレイヤーの次入力。空白、`,`、`;`、`/`、日本語/全角の近い記号を区切りとして扱う。
+
+        Returns:
+        - 正規化済みトークン配列。空入力または区切りだけの場合は空配列。
+
+        Caller:
+        - 先頭トークンを選択子、2番目の数値トークンを数量として扱う。
+        """
+        return [
+            self.text_preprocess(token)
+            for token in re.split(self.pending_choice_separator_pattern, text.strip())
+            if token != ""
+        ]
+
+    def execute_pending_buy(self, choice, count):
+        item_instance = choice["item_type"](count=count)
+        if self.player.buy(item_instance, self.shop):
+            txt = f"{choice['name']}を{count}個購入しました。"
+            print(txt)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            return True
+        return False
+
+    def execute_pending_use(self, choice, count):
+        used_count = 0
+        item_type = choice["item_type"]
+        for _ in range(count):
+            item_index = self.find_item_index(item_type)
+            if item_index is None:
+                break
+            if self.player.use(item_index):
+                used_count += 1
+        if used_count == 0:
+            txt = f"{choice['name']}がありません。"
+            print(txt)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            return False
+
+        txt = f"{choice['name']}を{used_count}個使用しました。"
+        print(txt)
+        self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+        return True
+
+    def find_item_index(self, item_type):
+        for idx, item in enumerate(self.player.item_box):
+            if isinstance(item, Item) and type(item) == item_type:
+                return idx
+        return None
 
     def use_position_with_eval(self, text, item, name_list):
         for name in name_list:
@@ -379,6 +586,5 @@ class Game:
                 else:
                     count = 1
                 item_instance = item(count=count)
-                self.player.buy(item_instance, self.shop)
-                return True
+                return self.player.buy(item_instance, self.shop)
         return False
