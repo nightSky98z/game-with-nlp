@@ -16,6 +16,7 @@ from game.GameConfig import GameConfig
 from game.Character import Goblin
 from game.Character import Slime
 from inference.TextUtils import normalize_text
+from game.UIFont import create_ui_font
 from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
 
 class Game:
@@ -52,10 +53,10 @@ class Game:
         """ディスプレイ関連の設定"""
         pygame.display.set_caption(GameConfig.TITLE)
         self.screen = pygame.display.set_mode(GameConfig.SCREEN_DIMENSIONS)
-        self.font = pygame.font.Font(None, 80)
-        self.text_font = pygame.font.SysFont(None, 25)
-        self.nlp_result_font = pygame.font.SysFont("notosansmonocjkjp", 25)
-        self.voice_status_font = pygame.font.SysFont("notosansmonocjkjp", 22)
+        self.font = create_ui_font(80)
+        self.text_font = create_ui_font(25)
+        self.nlp_result_font = create_ui_font(25)
+        self.voice_status_font = create_ui_font(22)
         self.eval_result = self.nlp_result_font.render("", True, Color.WHITE)
         self.action_result = self.nlp_result_font.render("", True, Color.WHITE)
         self.voice_status_result = self.voice_status_font.render("Vキーで音声入力", True, Color.WHITE)

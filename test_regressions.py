@@ -181,6 +181,7 @@ class GameRegressionTests(unittest.TestCase):
             "game.Color",
             "game.GameUtils",
             "game.GameConfig",
+            "game.UIFont",
             "joblib",
         )
 
@@ -313,6 +314,40 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual("AbC123ポーション", submitted)
         self.assertEqual("AbC123ポーション", game_object.nlp_text)
         self.assertEqual("", text_input.text)
+
+    def test_ui_font_uses_os_specific_japanese_font_candidates(self):
+        pygame = install_fake_pygame()
+
+        class TrackingFontModule:
+            def __init__(self):
+                self.match_calls = []
+                self.font_calls = []
+
+            def match_font(self, names, bold=False, italic=False):
+                self.match_calls.append((names, bold, italic))
+                return "/system/japanese-ui.ttf"
+
+            def Font(self, path, size):
+                self.font_calls.append((path, size))
+                return FakeFont()
+
+            def SysFont(self, names, size, bold=False, italic=False):
+                raise AssertionError("matched font path should be used before SysFont fallback")
+
+        font_module = TrackingFontModule()
+        pygame.font = font_module
+
+        from game.UIFont import create_ui_font
+        from game.UIFont import get_japanese_font_candidates
+
+        font = create_ui_font(25, platform_name="Windows")
+
+        self.assertIsInstance(font, FakeFont)
+        self.assertIn("Yu Gothic", get_japanese_font_candidates("Windows"))
+        self.assertIn("Hiragino Sans", get_japanese_font_candidates("Darwin"))
+        self.assertIn("Noto Sans CJK JP", get_japanese_font_candidates("Linux"))
+        self.assertEqual((get_japanese_font_candidates("Windows"), False, False), font_module.match_calls[0])
+        self.assertEqual([("/system/japanese-ui.ttf", 25)], font_module.font_calls)
 
     def test_normalize_text_applies_nfkc_before_lowercase(self):
         from inference.TextUtils import normalize_text
