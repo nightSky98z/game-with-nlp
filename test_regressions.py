@@ -117,6 +117,7 @@ class FakePygame(types.ModuleType):
         self.Rect = FakeRect
         self.Surface = FakeSurface
         self.Color = lambda name: name
+        self.time = types.SimpleNamespace(Clock=lambda: types.SimpleNamespace(tick=lambda fps: None))
         self.draw = types.SimpleNamespace(rect=lambda *args, **kwargs: None)
         self.sprite = types.SimpleNamespace(Sprite=FakeSpriteBase, Group=FakeGroup)
         self.font = types.SimpleNamespace(
@@ -184,6 +185,7 @@ class GameRegressionTests(unittest.TestCase):
             "inference.TextClassifier",
             "inference.TextUtils",
             "inference.eval",
+            "threading",
             "Game",
             "game",
             "game.SpriteSheet",
@@ -208,11 +210,26 @@ class GameRegressionTests(unittest.TestCase):
         install_fake_pygame()
         from game.SpriteSheet import SpriteSheet
 
-        sprite_sheet = SpriteSheet("./resources/missing.png", fallback_color=(255, 255, 255))
+        with contextlib.redirect_stdout(io.StringIO()) as stdout_buffer:
+            sprite_sheet = SpriteSheet("./resources/missing.png", fallback_color=(255, 255, 255))
         image = sprite_sheet.get_image(0, 0, 16, 16)
 
         self.assertEqual((255, 255, 255), image.fill_color)
         self.assertEqual((16, 16), image.size)
+        self.assertIn("Warning:", stdout_buffer.getvalue())
+        self.assertIn("デフォルトの矩形テクスチャを使用します", stdout_buffer.getvalue())
+
+    def test_sprite_missing_asset_warns_and_uses_default_rectangle(self):
+        install_fake_pygame()
+        from game.Sprite import Sprite
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout_buffer:
+            sprite = Sprite("./resources/missing.png", 1, 2, (8, 8), fallback_color=(1, 2, 3))
+
+        self.assertEqual((1, 2, 3), sprite.image.fill_color)
+        self.assertEqual((8, 8), sprite.image.size)
+        self.assertIn("Warning:", stdout_buffer.getvalue())
+        self.assertIn("デフォルトの矩形テクスチャを使用します", stdout_buffer.getvalue())
 
     def test_shop_missing_asset_uses_blue_rectangle(self):
         install_fake_pygame()
@@ -675,6 +692,32 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual([RURI_CLASSIFICATION_PREFIX + "打倒"], embedding_backend.encode_calls[0][0])
         self.assertEqual([[10.0, 20.0]], label_classifier.predict_embeddings)
 
+    def test_ruri_embedding_backend_shares_loaded_model_by_name_and_device(self):
+        fake_sentence_transformers = types.ModuleType("sentence_transformers")
+        load_calls = []
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name, device=None):
+                load_calls.append((model_name, device))
+
+            def encode(self, texts, batch_size=None, convert_to_numpy=None):
+                return [[float(len(text))] for text in texts]
+
+        fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
+        sys.modules["sentence_transformers"] = fake_sentence_transformers
+
+        from inference import TextClassifier
+        from inference.TextClassifier import RuriSentenceEmbeddingBackend
+
+        TextClassifier._ruri_model_cache.clear()
+        first_backend = RuriSentenceEmbeddingBackend(model_name="cl-nagoya/ruri-v3-30m", device="cpu")
+        second_backend = RuriSentenceEmbeddingBackend(model_name="cl-nagoya/ruri-v3-30m", device="cpu")
+
+        first_backend.encode(["トピック: 倒す"], batch_size=1)
+        second_backend.encode(["トピック: 使う"], batch_size=1)
+
+        self.assertEqual([("cl-nagoya/ruri-v3-30m", "cpu")], load_calls)
+
     def test_voice_input_records_transcribes_and_exposes_status(self):
         from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VOICE_STATE_IDLE, VOICE_STATE_RECORDING
         from game.VoiceInput import VOICE_STATE_TRANSCRIBING, VoiceInput
@@ -898,6 +941,276 @@ class GameRegressionTests(unittest.TestCase):
         finally:
             os.unlink(model_path)
 
+    def test_eval_async_warmup_loads_models_and_forces_embedding_warmup(self):
+        import threading as real_threading
+
+        target_eval = importlib.import_module("inference.eval")
+        load_started = real_threading.Event()
+        continue_load = real_threading.Event()
+        load_paths = []
+        predict_calls = []
+
+        class FakeThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+                self.daemon = daemon
+                self.started = False
+
+            def start(self):
+                self.started = True
+                self.target()
+
+        def fake_get_model(model_path):
+            load_paths.append(model_path)
+            load_started.set()
+            continue_load.wait(timeout=0.01)
+            return object()
+
+        def fake_predict_label_id(model, text):
+            predict_calls.append((model, text))
+            return 0
+
+        target_eval._model_cache = {}
+        target_eval._warmup_state = target_eval.WARMUP_STATE_IDLE
+        target_eval._warmup_error_message = None
+        target_eval._get_model = fake_get_model
+        target_eval.predict_label_id = fake_predict_label_id
+        target_eval.threading.Thread = FakeThread
+
+        self.assertTrue(target_eval.start_async_warmup())
+        self.assertEqual(target_eval.WARMUP_STATE_READY, target_eval.get_warmup_state())
+        self.assertIsNone(target_eval.get_warmup_error_message())
+        self.assertIsNone(target_eval.get_warmup_error_code())
+        self.assertEqual([target_eval.MODEL1_PATH, target_eval.MODEL2_PATH], load_paths)
+        self.assertEqual(2, len(predict_calls))
+        self.assertEqual(target_eval.WARMUP_SAMPLE_TEXT, predict_calls[0][1])
+        self.assertEqual(target_eval.WARMUP_SAMPLE_TEXT, predict_calls[1][1])
+
+    def test_eval_async_warmup_marks_model_load_error_code(self):
+        target_eval = importlib.import_module("inference.eval")
+
+        def failing_get_model(model_path):
+            raise target_eval.ModelLoadError("モデルファイルが存在しません")
+
+        target_eval._model_cache = {}
+        target_eval._warmup_state = target_eval.WARMUP_STATE_LOADING
+        target_eval._warmup_error_message = None
+        target_eval._warmup_error_code = None
+        target_eval._get_model = failing_get_model
+
+        target_eval._warmup_models()
+
+        self.assertEqual(target_eval.WARMUP_STATE_ERROR, target_eval.get_warmup_state())
+        self.assertEqual(target_eval.ERROR_CODE_NLP_MODEL_LOAD_FAILED, target_eval.get_warmup_error_code())
+        self.assertIn("モデルファイルが存在しません", target_eval.get_warmup_error_message())
+
+    def test_eval_async_warmup_marks_prediction_error_code(self):
+        target_eval = importlib.import_module("inference.eval")
+
+        def fake_get_model(model_path):
+            return object()
+
+        def failing_predict_label_id(model, text):
+            raise target_eval.TextClassifierError("embedding 生成失敗")
+
+        target_eval._model_cache = {}
+        target_eval._warmup_state = target_eval.WARMUP_STATE_LOADING
+        target_eval._warmup_error_message = None
+        target_eval._warmup_error_code = None
+        target_eval._get_model = fake_get_model
+        target_eval.predict_label_id = failing_predict_label_id
+
+        target_eval._warmup_models()
+
+        self.assertEqual(target_eval.WARMUP_STATE_ERROR, target_eval.get_warmup_state())
+        self.assertEqual(target_eval.ERROR_CODE_NLP_WARMUP_PREDICT_FAILED, target_eval.get_warmup_error_code())
+        self.assertIn("embedding 生成失敗", target_eval.get_warmup_error_message())
+
+    def test_eval_async_warmup_marks_error_when_prediction_raises_unexpected_error(self):
+        target_eval = importlib.import_module("inference.eval")
+
+        def fake_get_model(model_path):
+            return object()
+
+        def failing_predict_label_id(model, text):
+            raise ValueError("壊れた分類器出力")
+
+        target_eval._model_cache = {}
+        target_eval._warmup_state = target_eval.WARMUP_STATE_LOADING
+        target_eval._warmup_error_message = None
+        target_eval._warmup_error_code = None
+        target_eval._get_model = fake_get_model
+        target_eval.predict_label_id = failing_predict_label_id
+
+        target_eval._warmup_models()
+
+        self.assertEqual(target_eval.WARMUP_STATE_ERROR, target_eval.get_warmup_state())
+        self.assertEqual(target_eval.ERROR_CODE_NLP_WARMUP_UNKNOWN_FAILED, target_eval.get_warmup_error_code())
+        self.assertIn("壊れた分類器出力", target_eval.get_warmup_error_message())
+
+    def test_game_eval_text_waits_while_nlp_model_is_loading(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.WARMUP_STATE_LOADING = "loading"
+        fake_eval.WARMUP_STATE_ERROR = "error"
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.get_warmup_state = lambda: fake_eval.WARMUP_STATE_LOADING
+        fake_eval.get_warmup_error_message = lambda: None
+        fake_eval.predict_category = lambda text: (_ for _ in ()).throw(AssertionError("loading 中は分類しない"))
+        fake_eval.predict_type = lambda text: (_ for _ in ()).throw(AssertionError("loading 中は分類しない"))
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = "ゴブリンを倒して"
+        game.player = types.SimpleNamespace(target="old", action_type="combat")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("ゴブリンを倒して")
+
+        self.assertFalse(result)
+        self.assertEqual("", game.nlp_text)
+        self.assertEqual("old", game.player.target)
+        self.assertEqual("combat", game.player.action_type)
+        self.assertEqual("NLPモデル読み込み中", game.eval_result.rendered_text)
+        self.assertEqual("読み込み完了後にもう一度入力してください。", game.action_result.rendered_text)
+
+    def test_game_ignores_text_and_voice_input_events_while_nlp_model_is_loading(self):
+        pygame = install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.WARMUP_STATE_LOADING = "loading"
+        fake_eval.WARMUP_STATE_ERROR = "error"
+        fake_eval.get_warmup_state = lambda: fake_eval.WARMUP_STATE_LOADING
+        fake_eval.get_warmup_error_message = lambda: None
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        keydown_event = types.SimpleNamespace(type=pygame.KEYDOWN, key=pygame.K_v)
+        pygame.event = types.SimpleNamespace(get=lambda: [keydown_event])
+
+        class FakeTextInputBox:
+            def __init__(self):
+                self.events = []
+                self.active = False
+
+            def handle_event(self, event, game_object):
+                self.events.append(event)
+                game_object.nlp_text = "ゴブリンを倒して"
+
+        class FakeVoiceInput:
+            def __init__(self):
+                self.started = 0
+
+            def start_recording(self):
+                self.started += 1
+
+        game = Game.__new__(Game)
+        game.nlp_text = ""
+        game.text_input_box = FakeTextInputBox()
+        game.voice_input = FakeVoiceInput()
+        game.player = types.SimpleNamespace(use=lambda index: None)
+
+        game.handle_events()
+
+        self.assertEqual([], game.text_input_box.events)
+        self.assertEqual(0, game.voice_input.started)
+        self.assertEqual("", game.nlp_text)
+
+    def test_game_setup_starts_nlp_model_warmup(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.start_count = 0
+
+        def start_async_warmup():
+            fake_eval.start_count += 1
+            return True
+
+        fake_eval.start_async_warmup = start_async_warmup
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        game = Game.__new__(Game)
+        game.clock = types.SimpleNamespace()
+        game.running = False
+
+        Game.setup_game_components(game)
+
+        self.assertEqual(1, fake_eval.start_count)
+
+    def test_game_renders_nlp_model_loading_status(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.WARMUP_STATE_LOADING = "loading"
+        fake_eval.WARMUP_STATE_READY = "ready"
+        fake_eval.WARMUP_STATE_ERROR = "error"
+        fake_eval.get_warmup_state = lambda: fake_eval.WARMUP_STATE_LOADING
+        fake_eval.get_warmup_error_message = lambda: None
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        game = Game.__new__(Game)
+        game.screen = FakeSurface((800, 600))
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+
+        Game.render_nlp_model_status(game)
+
+        self.assertEqual("NLPモデル読み込み中", game.eval_result.rendered_text)
+        self.assertEqual("入力は読み込み完了後に実行されます。", game.action_result.rendered_text)
+
+    def test_game_warns_and_stops_safely_when_nlp_model_data_is_missing(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.WARMUP_STATE_LOADING = "loading"
+        fake_eval.WARMUP_STATE_READY = "ready"
+        fake_eval.WARMUP_STATE_ERROR = "error"
+        fake_eval.get_warmup_state = lambda: fake_eval.WARMUP_STATE_ERROR
+        fake_eval.get_warmup_error_message = lambda: "モデルファイルが存在しません: inference/model1_sklearn.joblib"
+        fake_eval.get_warmup_error_code = lambda: "NLP_MODEL_LOAD_FAILED"
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        game = Game.__new__(Game)
+        game.running = True
+        game.screen = FakeSurface((800, 600))
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout_buffer:
+            Game.render_nlp_model_status(game)
+
+        self.assertFalse(game.running)
+        self.assertIn("Warning:", stdout_buffer.getvalue())
+        self.assertIn("[NLP_MODEL_LOAD_FAILED]", stdout_buffer.getvalue())
+        self.assertIn("プログラムを安全に終了します", stdout_buffer.getvalue())
+        self.assertEqual("NLPモデル読み込み失敗", game.eval_result.rendered_text)
+        self.assertIn("[NLP_MODEL_LOAD_FAILED]", game.action_result.rendered_text)
+        self.assertIn("安全に終了します", game.action_result.rendered_text)
+
     def test_game_eval_text_reports_model_error_without_raising(self):
         install_fake_pygame()
         fake_eval = types.ModuleType("eval")
@@ -910,6 +1223,7 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.unknown = 6
         fake_eval.map = 0
         fake_eval.box = 1
+        fake_eval.ERROR_CODE_NLP_MODEL_LOAD_FAILED = "NLP_MODEL_LOAD_FAILED"
         fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
 
         def raise_model_error(text):
@@ -927,15 +1241,18 @@ class GameRegressionTests(unittest.TestCase):
         game.eval_result = None
         game.action_result = None
         game.nlp_text = "スライムへ移動"
+        game.running = True
         game.player = types.SimpleNamespace(target="old", action_type="combat")
 
         with contextlib.redirect_stdout(io.StringIO()):
             result = game.eval_text("スライムへ移動")
 
         self.assertFalse(result)
+        self.assertFalse(game.running)
         self.assertIsNone(game.player.target)
         self.assertIsNone(game.player.action_type)
         self.assertIsInstance(game.action_result, FakeSurface)
+        self.assertIn("[NLP_MODEL_LOAD_FAILED]", game.action_result.rendered_text)
 
     def test_game_eval_text_accepts_integer_labels(self):
         install_fake_pygame()
@@ -1029,6 +1346,46 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual(1, game.voice_input.stopped)
         self.assertEqual(["スライムへ移動"], game.eval_calls)
 
+    def test_movement_command_with_shop_alias_targets_shop_building(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        fake_eval.predict_category = lambda text: fake_eval.movement
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        shop = types.SimpleNamespace(name="商店", x=200, y=200, position=(200, 200), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None)
+        game.monsters = []
+        game.buildings = [shop]
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("ショップに移動")
+
+        self.assertIsNone(result)
+        self.assertIs(shop, game.player.target)
+        self.assertEqual("movement", game.player.action_type)
+        self.assertEqual("商店:移動", game.action_result.rendered_text)
+
     def test_voice_combat_command_without_name_targets_nearest_monster(self):
         install_fake_pygame()
         fake_eval = types.ModuleType("eval")
@@ -1118,6 +1475,54 @@ class GameRegressionTests(unittest.TestCase):
         self.assertIsNone(game.player.target)
         self.assertIsNone(game.player.action_type)
         self.assertEqual("ゴブリンがマップにいませんでした。", game.action_result.rendered_text)
+
+    def test_unknown_combat_command_retries_category_with_generic_monster_name(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        category_calls = []
+
+        def predict_category(text):
+            category_calls.append(text)
+            if text == "モンスターを倒して":
+                return fake_eval.combat
+            return fake_eval.unknown
+
+        fake_eval.predict_category = predict_category
+        fake_eval.predict_type = lambda text: fake_eval.map
+        sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
+
+        from game.Game import Game
+
+        slime = types.SimpleNamespace(name="スライム", x=3, y=4, position=(3, 4), alive=True)
+        game = Game.__new__(Game)
+        game.nlp_result_font = FakeFont()
+        game.eval_result = None
+        game.action_result = None
+        game.nlp_text = ""
+        game.start_eval = False
+        game.pending_choice = None
+        game.player = types.SimpleNamespace(target=None, action_type=None, x=0, y=0, position=(0, 0))
+        game.monsters = [slime]
+        game.buildings = []
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = game.eval_text("スライムを倒して")
+
+        self.assertTrue(result)
+        self.assertEqual(["スライムを倒して", "モンスターを倒して"], category_calls)
+        self.assertIs(slime, game.player.target)
+        self.assertEqual("combat", game.player.action_type)
 
     def test_combat_command_with_similar_spoken_target_uses_best_alive_monster_match(self):
         install_fake_pygame()

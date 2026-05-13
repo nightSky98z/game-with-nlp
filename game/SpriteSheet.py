@@ -16,7 +16,8 @@ class SpriteSheet:
         self.fallback_color = fallback_color
         try:
             self.sprite_sheet = pygame.image.load(filename).convert_alpha()
-        except (pygame.error, FileNotFoundError):
+        except (pygame.error, FileNotFoundError) as err:
+            print(f"Warning: スプライトシートを読み込めません: {err}。デフォルトの矩形テクスチャを使用します。")
             self.sprite_sheet = None
 
     def get_image(self, x, y, width, height):

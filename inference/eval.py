@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 
 from inference.TextClassifier import TextClassifierError
 from inference.TextClassifier import load_text_classifier
@@ -11,6 +12,21 @@ MODEL1_PATH = str(MODEL_DIR / "model1_sklearn.joblib")
 MODEL2_PATH = str(MODEL_DIR / "model2_sklearn.joblib")
 
 _model_cache = {}
+_warmup_lock = threading.Lock()
+_warmup_thread = None
+_warmup_error_message = None
+_warmup_error_code = None
+
+WARMUP_STATE_IDLE = "idle"
+WARMUP_STATE_LOADING = "loading"
+WARMUP_STATE_READY = "ready"
+WARMUP_STATE_ERROR = "error"
+WARMUP_SAMPLE_TEXT = "ゴブリンを倒して"
+_warmup_state = WARMUP_STATE_IDLE
+
+ERROR_CODE_NLP_MODEL_LOAD_FAILED = "NLP_MODEL_LOAD_FAILED"
+ERROR_CODE_NLP_WARMUP_PREDICT_FAILED = "NLP_WARMUP_PREDICT_FAILED"
+ERROR_CODE_NLP_WARMUP_UNKNOWN_FAILED = "NLP_WARMUP_UNKNOWN_FAILED"
 
 
 class ModelLoadError(RuntimeError):
@@ -51,6 +67,116 @@ def _get_model(model_path):
         raise ModelLoadError(str(err)) from err
     _model_cache[model_path] = model
     return model
+
+
+def start_async_warmup():
+    """NLP 推論モデルを background thread で先読みする。
+
+    Returns:
+    - 新しい warm-up thread を開始した場合は `True`。
+    - すでに loading / ready の場合は `False`。
+
+    Caller:
+    - pygame 初期化後、入力を受ける前に 1 回呼ぶ。
+    - loading 中の入力実行は `get_warmup_state()` を見て上位で止める。
+    """
+    global _warmup_thread
+    global _warmup_state
+    global _warmup_error_message
+    global _warmup_error_code
+
+    with _warmup_lock:
+        if _warmup_state in (WARMUP_STATE_LOADING, WARMUP_STATE_READY):
+            return False
+        _warmup_state = WARMUP_STATE_LOADING
+        _warmup_error_message = None
+        _warmup_error_code = None
+
+    warmup_thread = threading.Thread(target=_warmup_models, daemon=True)
+    _warmup_thread = warmup_thread
+    warmup_thread.start()
+    return True
+
+
+def get_warmup_state():
+    """現在の NLP warm-up 状態を返す。
+
+    Returns:
+    - `idle` / `loading` / `ready` / `error`。
+    """
+    with _warmup_lock:
+        return _warmup_state
+
+
+def get_warmup_error_message():
+    """NLP warm-up 失敗時のエラーメッセージを返す。
+
+    Returns:
+    - エラー文字列。
+    - エラーがない場合は `None`。
+    """
+    with _warmup_lock:
+        return _warmup_error_message
+
+
+def get_warmup_error_code():
+    """NLP warm-up 失敗時の安定したエラーコードを返す。
+
+    Returns:
+    - `NLP_MODEL_LOAD_FAILED` などのエラーコード。
+    - エラーがない場合は `None`。
+
+    Caller:
+    - ログや UI にはこの値を含める。例外文言ではなく、このコードで失敗境界を分類する。
+    """
+    with _warmup_lock:
+        return _warmup_error_code
+
+
+def _set_warmup_error(error_code, error_message):
+    """warm-up 失敗状態を 1 つの lock 境界で保存する。
+
+    Params:
+    - error_code: ログ検索用の安定したエラーコード。
+    - error_message: 実行時例外から得た詳細。呼び出し側はデバッグ用として扱う。
+
+    Caller:
+    - background thread から呼ぶ。state / code / message を別々に更新しない。
+    """
+    global _warmup_state
+    global _warmup_error_message
+    global _warmup_error_code
+
+    with _warmup_lock:
+        _warmup_state = WARMUP_STATE_ERROR
+        _warmup_error_code = error_code
+        _warmup_error_message = error_message
+
+
+def _warmup_models():
+    global _warmup_state
+    global _warmup_error_message
+    global _warmup_error_code
+
+    try:
+        category_model = _get_model(MODEL1_PATH)
+        type_model = _get_model(MODEL2_PATH)
+        predict_label_id(category_model, WARMUP_SAMPLE_TEXT)
+        predict_label_id(type_model, WARMUP_SAMPLE_TEXT)
+    except ModelLoadError as err:
+        _set_warmup_error(ERROR_CODE_NLP_MODEL_LOAD_FAILED, str(err))
+        return
+    except TextClassifierError as err:
+        _set_warmup_error(ERROR_CODE_NLP_WARMUP_PREDICT_FAILED, str(err))
+        return
+    except Exception as err:
+        _set_warmup_error(ERROR_CODE_NLP_WARMUP_UNKNOWN_FAILED, f"NLP warm-up 推論に失敗しました: {err}")
+        return
+
+    with _warmup_lock:
+        _warmup_state = WARMUP_STATE_READY
+        _warmup_error_message = None
+        _warmup_error_code = None
 
 
 def predict_category(text: str) -> int:

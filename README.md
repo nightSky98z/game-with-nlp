@@ -134,7 +134,7 @@ LogisticRegression: embedding 上でカテゴリ境界を引く
 
 そのため、学習データは大量でなくてもよいですが、各カテゴリの代表例は必要です。例えば combat には `倒す` だけでなく、`斬る`、`打倒`、`打死`、`攻撃する` のような言い換えを少数入れておくと境界が安定します。
 
-速度面では、初回は Ruri v3 のモデルロードが重く、2 回目以降は embedding 計算と `LogisticRegression` 推論が主なコストになります。`cl-nagoya/ruri-v3-30m` は Ruri v3 系の小さいモデルなので、意味理解と実行速度のバランスを取るための第一候補です。
+速度面では、初回は Ruri v3 のモデルロードが重く、2 回目以降は embedding 計算と `LogisticRegression` 推論が主なコストになります。ゲーム起動時に background thread でダミー分類を 1 回実行し、Ruri の重みロードまで先に済ませます。読み込み中はテキスト/音声コマンド入力を受け付けず、読み込み完了後に入力できる設計です。`cl-nagoya/ruri-v3-30m` は Ruri v3 系の小さいモデルなので、意味理解と実行速度のバランスを取るための第一候補です。
 
 実測確認済みの例:
 
@@ -176,6 +176,30 @@ Warning: You are sending unauthenticated requests to the HF Hub.
 ```text
 音声ターゲット補正: オフリング->ゴブリン (0.40)
 ```
+
+## ファイル読み込み失敗時の扱い
+
+ファイルを読み込めない場合は標準出力へ `Warning:` を出します。
+
+テクスチャやスプライトシートを読み込めない場合、ゲームは停止しません。代わりに pygame で生成したデフォルトの矩形テクスチャを使い、以下のように理由を出します。
+
+```text
+Warning: テクスチャを読み込めません: ...。デフォルトの矩形テクスチャを使用します。
+```
+
+NLP モデルロードデータを読み込めない場合は、分類なしで続行するとゲーム操作が壊れるため、理由を表示して `running = False` にし、`Main.py` の `finally` から `game.shutdown()` を通して安全に終了します。
+
+```text
+Warning: [NLP_MODEL_LOAD_FAILED] NLPモデルロードデータを読み込めません: ...。プログラムを安全に終了します。
+```
+
+NLP 周りの `Warning:` にはデバッグ用のエラーコードを付けます。
+
+| コード | 意味 |
+| --- | --- |
+| `NLP_MODEL_LOAD_FAILED` | joblib モデルファイル、依存ライブラリ、または保存済み分類器を読み込めない。 |
+| `NLP_WARMUP_PREDICT_FAILED` | warm-up 中に Ruri embedding 生成や分類器推論が失敗した。 |
+| `NLP_WARMUP_UNKNOWN_FAILED` | warm-up worker 内で想定外の例外が発生した。 |
 
 ## 戦闘ターゲット解決
 

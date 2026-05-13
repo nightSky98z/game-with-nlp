@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+import threading
 
 from inference.TextUtils import normalize_text
 
@@ -10,6 +11,8 @@ DEFAULT_RURI_MODEL_NAME = "cl-nagoya/ruri-v3-30m"
 DEFAULT_RURI_DEVICE = "cpu"
 DEFAULT_RURI_BATCH_SIZE = 32
 RURI_CLASSIFICATION_PREFIX = "トピック: "
+_ruri_model_cache = {}
+_ruri_model_cache_lock = threading.Lock()
 
 
 class TextClassifierError(RuntimeError):
@@ -93,14 +96,24 @@ class RuriSentenceEmbeddingBackend:
     def _get_model(self):
         if self.model is not None:
             return self.model
+        cache_key = (self.model_name, self.device)
+        with _ruri_model_cache_lock:
+            cached_model = _ruri_model_cache.get(cache_key)
+            if cached_model is not None:
+                self.model = cached_model
+                return self.model
+
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as err:
             raise TextClassifierError("sentence-transformers が利用できません") from err
         try:
-            self.model = SentenceTransformer(self.model_name, device=self.device)
+            loaded_model = SentenceTransformer(self.model_name, device=self.device)
         except Exception as err:
             raise TextClassifierError(f"Ruri v3 モデルを読み込めません: {self.model_name}") from err
+
+        with _ruri_model_cache_lock:
+            self.model = _ruri_model_cache.setdefault(cache_key, loaded_model)
         return self.model
 
 

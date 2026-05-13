@@ -34,8 +34,7 @@ class Sprite(pygame.sprite.Sprite):
             # 画像のリサイズ
             self.image = pygame.transform.scale(original_image, size)
         except (pygame.error, FileNotFoundError) as e:
-            print(f"画像の読み込みエラー: {e}")
-            # エラー時はデフォルトの四角形を表示
+            print(f"Warning: テクスチャを読み込めません: {e}。デフォルトの矩形テクスチャを使用します。")
             self.image = pygame.Surface(size)
             self.image.fill(fallback_color)
 

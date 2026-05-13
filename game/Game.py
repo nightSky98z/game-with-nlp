@@ -35,6 +35,9 @@ class Game:
     }
     generic_potion_aliases = ("ポーション", "薬")
     generic_combat_target_names = ("敵", "モンスター")
+    building_aliases_by_name = {
+        "商店": ("商店", "ショップ", "shop"),
+    }
     # 選択待ち中だけ、短い入力の選択子と数量を記号でも分けられるようにする。
     pending_choice_separator_pattern = r"[\s,;/、，；／]+"
 
@@ -74,6 +77,7 @@ class Game:
         self.start_eval = False
         self.pending_choice: dict | None = None
         self.voice_input = VoiceInput()
+        eval.start_async_warmup()
 
     def setup_characters(self) -> None:
         """キャラクターの初期設定"""
@@ -118,6 +122,7 @@ class Game:
     def handle_events(self) -> None:
         """イベント処理"""
         events = pygame.event.get()
+        can_accept_nlp_input = self.can_accept_nlp_input()
         for event in events:
             if event.type == pygame.QUIT:
                 self.running = False
@@ -126,9 +131,10 @@ class Game:
                 if event.key == pygame.K_u and not self.is_text_input_active():
                     self.player.use(index=0)
 
-            self.handle_voice_input_event(event)
-            self.text_input_box.handle_event(event, self)
-            if self.nlp_text != "":
+            if can_accept_nlp_input:
+                self.handle_voice_input_event(event)
+                self.text_input_box.handle_event(event, self)
+            if can_accept_nlp_input and self.nlp_text != "":
                 self.eval_text(self.nlp_text)
 
     def update_game_state(self) -> None:
@@ -165,6 +171,7 @@ class Game:
         if self.start_eval:
             self.screen.blit(self.eval_result, (300, 40))
             self.screen.blit(self.action_result, (300, 70))
+        self.render_nlp_model_status()
         pygame.display.update()
 
     def maintain_frame_rate(self) -> None:
@@ -254,6 +261,38 @@ class Game:
         self.voice_status_result = self.voice_status_font.render(status_text, True, Color.WHITE)
         self.screen.blit(self.voice_status_result, (300, 510))
 
+    def render_nlp_model_status(self):
+        """NLP モデルの warm-up 状態を画面へ反映する。
+
+        Caller:
+        - 描画フレームごとに呼ぶ。loading / error のときだけ表示内容を更新する。
+        """
+        get_warmup_state = getattr(eval, "get_warmup_state", None)
+        if get_warmup_state is None:
+            return
+
+        warmup_state = get_warmup_state()
+        if warmup_state == getattr(eval, "WARMUP_STATE_LOADING", "loading"):
+            self.eval_result = self.nlp_result_font.render("NLPモデル読み込み中", True, Color.WHITE)
+            self.action_result = self.nlp_result_font.render("入力は読み込み完了後に実行されます。", True, Color.WHITE)
+            self.screen.blit(self.eval_result, (300, 40))
+            self.screen.blit(self.action_result, (300, 70))
+            return
+
+        if warmup_state == getattr(eval, "WARMUP_STATE_ERROR", "error"):
+            error_message = eval.get_warmup_error_message()
+            error_code = self.get_nlp_warmup_error_code()
+            txt = self.format_error_message_with_code(
+                error_code,
+                f"NLPモデルロードデータを読み込めません: {error_message}。プログラムを安全に終了します。",
+            )
+            print(f"Warning: {txt}")
+            self.eval_result = self.nlp_result_font.render("NLPモデル読み込み失敗", True, Color.WHITE)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            self.screen.blit(self.eval_result, (300, 40))
+            self.screen.blit(self.action_result, (300, 70))
+            self.running = False
+
 
 # nlp部分
     def eval_text(self, text):
@@ -262,18 +301,45 @@ class Game:
         if getattr(self, "pending_choice", None) is not None:
             return self.resolve_pending_choice(text)
 
+        if self.is_nlp_model_loading():
+            self.nlp_text = ""
+            txt = "読み込み完了後にもう一度入力してください。"
+            print(txt)
+            self.eval_result = self.nlp_result_font.render("NLPモデル読み込み中", True, Color.WHITE)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            return False
+
+        if self.is_nlp_model_warmup_failed():
+            self.nlp_text = ""
+            error_message = eval.get_warmup_error_message()
+            error_code = self.get_nlp_warmup_error_code()
+            txt = self.format_error_message_with_code(
+                error_code,
+                f"NLPモデルロードデータを読み込めません: {error_message}。プログラムを安全に終了します。",
+            )
+            print(f"Warning: {txt}")
+            self.eval_result = self.nlp_result_font.render("NLPモデル読み込み失敗", True, Color.WHITE)
+            self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            self.running = False
+            return False
+
         self.eval_init()
         if text == None or text == "":
             return
         text = self.text_preprocess(text)
         try:
-            label_category = eval.predict_category(text)
+            label_category = self.predict_category_with_monster_name_fallback(text)
             label_type = eval.predict_type(text)
         except eval.ModelLoadError as err:
-            txt = f"NLPモデルを読み込めません: {err}"
-            print(txt)
+            error_code = getattr(eval, "ERROR_CODE_NLP_MODEL_LOAD_FAILED", "NLP_MODEL_LOAD_FAILED")
+            txt = self.format_error_message_with_code(
+                error_code,
+                f"NLPモデルロードデータを読み込めません: {err}。プログラムを安全に終了します。",
+            )
+            print(f"Warning: {txt}")
             self.eval_result = self.nlp_result_font.render("NLPモデル読み込み失敗", True, Color.WHITE)
             self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
+            self.running = False
             return False
 
         category_message = ""
@@ -298,9 +364,9 @@ class Game:
                     print(txt)
                     self.action_result = self.nlp_result_font.render(txt, True, Color.WHITE)
                     return
-            for i, building in enumerate(self.buildings):
-                if building.name in text:
-                    self.player.target = self.buildings[i]
+            for building in self.buildings:
+                if self.building_name_matches_text(building, text):
+                    self.player.target = building
                     self.player.action_type = "movement"
                     txt = f"{building.name}:移動"
                     print(txt)
@@ -466,6 +532,140 @@ class Game:
 
     def text_preprocess(self, text):
         return normalize_text(text)
+
+    def building_name_matches_text(self, building, text):
+        """建造物が入力文で指定されているか返す。
+
+        Params:
+        - building: マップ上の建造物。`name` はゲーム内の正規名として扱う。
+        - text: `text_preprocess()` 後の入力文。呼び出し中は変更しない。
+
+        Returns:
+        - `True`: 正規名または登録 alias が入力文に含まれる。
+        - `False`: この建造物を指定していない。
+
+        Caller:
+        - 移動対象解決用。`ショップ` のような音声/自然文の呼び方を、内部名 `商店` に対応づける。
+        """
+        building_name = self.text_preprocess(getattr(building, "name", ""))
+        if building_name != "" and building_name in text:
+            return True
+
+        aliases = self.building_aliases_by_name.get(building_name, ())
+        for alias in aliases:
+            normalized_alias = self.text_preprocess(alias)
+            if normalized_alias != "" and normalized_alias in text:
+                return True
+        return False
+
+    def predict_category_with_monster_name_fallback(self, text):
+        """入力文のカテゴリを推論し、未知の場合だけ既知モンスター名を汎用化して再推論する。
+
+        Params:
+        - text: `text_preprocess()` 後の入力文。ターゲット解決用の原文としては変更しない。
+
+        Returns:
+        - カテゴリ ID。元の入力で未知以外なら、その結果をそのまま返す。
+        - 既知モンスター名の偏りで未知になった場合は、汎用化後のカテゴリ ID を返す。
+
+        Errors:
+        - eval.ModelLoadError: 分類モデルを読み込めない場合。呼び出し側で安全終了へ変換する。
+
+        Caller:
+        - 戦闘対象などの slot 解決は、この関数の戻り値ではなく元の `text` を使う。
+        """
+        label_category = int(eval.predict_category(text))
+        if label_category != eval.unknown:
+            return label_category
+
+        generic_text = self.replace_known_monster_names_with_generic_name(text)
+        if generic_text == text:
+            return label_category
+
+        fallback_label_category = int(eval.predict_category(generic_text))
+        if fallback_label_category == eval.unknown:
+            return label_category
+
+        print(f"カテゴリ補正: {text}->{generic_text}")
+        return fallback_label_category
+
+    def replace_known_monster_names_with_generic_name(self, text):
+        """分類用テキスト内の既知モンスター名を `モンスター` に置換する。
+
+        Params:
+        - text: `text_preprocess()` 後の入力文。戻り値用に新しい文字列として扱う。
+
+        Returns:
+        - 既知モンスター名を汎用名へ置換した分類用テキスト。
+        - 対象名が含まれない場合は入力と同じ文字列。
+
+        Caller:
+        - カテゴリ分類の fallback 専用。ターゲット名の解決や存在確認には使わない。
+        """
+        generic_monster_name = "モンスター"
+        generic_text = text
+        for monster_name in self.known_monster_names:
+            normalized_monster_name = self.text_preprocess(monster_name)
+            if normalized_monster_name == "":
+                continue
+            generic_text = generic_text.replace(normalized_monster_name, generic_monster_name)
+        return generic_text
+
+    def is_nlp_model_loading(self):
+        get_warmup_state = getattr(eval, "get_warmup_state", None)
+        if get_warmup_state is None:
+            return False
+        warmup_loading_state = getattr(eval, "WARMUP_STATE_LOADING", "loading")
+        return get_warmup_state() == warmup_loading_state
+
+    def is_nlp_model_warmup_failed(self):
+        get_warmup_state = getattr(eval, "get_warmup_state", None)
+        if get_warmup_state is None:
+            return False
+        warmup_error_state = getattr(eval, "WARMUP_STATE_ERROR", "error")
+        return get_warmup_state() == warmup_error_state
+
+    def get_nlp_warmup_error_code(self):
+        """NLP warm-up 失敗時のエラーコードを取得する。
+
+        Returns:
+        - `NLP_MODEL_LOAD_FAILED` などのログ検索用コード。
+        - 旧 eval 境界や未設定時は `None`。
+
+        Caller:
+        - UI / Warning 表示用。制御分岐は warm-up state を使う。
+        """
+        get_warmup_error_code = getattr(eval, "get_warmup_error_code", None)
+        if get_warmup_error_code is None:
+            return None
+        return get_warmup_error_code()
+
+    def format_error_message_with_code(self, error_code, message):
+        """エラー詳細に安定したコード prefix を付ける。
+
+        Params:
+        - error_code: ログ検索用コード。`None` または空文字なら prefix を付けない。
+        - message: ユーザー向け説明と詳細原因を含む文字列。
+
+        Returns:
+        - `[CODE] message` 形式の文字列。
+        - コードがない場合は `message` をそのまま返す。
+
+        Caller:
+        - ログと UI に同じ文字列を出し、デバッグ時に画面表示と標準出力を照合できるようにする。
+        """
+        if error_code is None or error_code == "":
+            return message
+        return f"[{error_code}] {message}"
+
+    def can_accept_nlp_input(self):
+        """テキスト/音声コマンドを受け付けてよい状態か返す。
+
+        Returns:
+        - `True`: NLP モデルが未管理、idle、または ready。
+        - `False`: loading または error のため、コマンド入力を実行境界へ渡さない。
+        """
+        return not self.is_nlp_model_loading() and not self.is_nlp_model_warmup_failed()
 
     def find_alive_monster_named_in_text(self, text):
         """入力文に含まれる生存モンスターを返す。
