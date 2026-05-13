@@ -19,6 +19,7 @@ from GameConfig import GameConfig
 from Character import Goblin
 from Character import Slime
 from TextUtils import normalize_text
+from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInput
 
 class Game:
     """ゲームのメインクラス"""
@@ -57,8 +58,10 @@ class Game:
         self.font = pygame.font.Font(None, 80)
         self.text_font = pygame.font.SysFont(None, 25)
         self.nlp_result_font = pygame.font.SysFont("notosansmonocjkjp", 25)
+        self.voice_status_font = pygame.font.SysFont("notosansmonocjkjp", 22)
         self.eval_result = self.nlp_result_font.render("", True, Color.WHITE)
         self.action_result = self.nlp_result_font.render("", True, Color.WHITE)
+        self.voice_status_result = self.voice_status_font.render("Vキーで音声入力", True, Color.WHITE)
 
     def setup_game_components(self) -> None:
         """ゲームコンポーネントの設定"""
@@ -73,6 +76,7 @@ class Game:
         self.nlp_text = ""
         self.start_eval = False
         self.pending_choice = None
+        self.voice_input = VoiceInput()
 
     def setup_characters(self) -> None:
         """キャラクターの初期設定"""
@@ -108,6 +112,7 @@ class Game:
     def update(self) -> None:
         """メインゲームループ"""
         self.handle_events()
+        self.consume_voice_input_events()
         self.render()
         self.maintain_frame_rate()
 
@@ -122,6 +127,7 @@ class Game:
                 if event.key == pygame.K_u:
                     self.player.use(index=0)
 
+            self.handle_voice_input_event(event)
             self.text_input_box.handle_event(event, self)
             if self.nlp_text != "":
                 self.eval_text(self.nlp_text)
@@ -154,6 +160,7 @@ class Game:
         self.render_box()
         self.update_game_state()
         self.text_input_box.draw(self.screen)
+        self.render_voice_input_status()
 
         if self.start_eval:
             self.screen.blit(self.eval_result, (300, 40))
@@ -167,6 +174,8 @@ class Game:
     def shutdown(self) -> None:
         """ゲームの終了処理"""
         self.running = False
+        if hasattr(self, "voice_input"):
+            self.voice_input.wait_for_pending_transcription(timeout_seconds=1.0)
         pygame.quit()
         sys.exit()
 
@@ -188,6 +197,49 @@ class Game:
                 text = self.text_font.render(str(count), True, Color.WHITE)
                 self.screen.blit(text, (BOX_POSITION[idx][0] + ITEM_SHOW_COUNT_OFFSET,
                                         BOX_POSITION[idx][1] + ITEM_SHOW_COUNT_OFFSET))
+
+    def handle_voice_input_event(self, event):
+        """音声入力用の push-to-talk キーイベントを処理する。
+
+        Params:
+        - event: pygame event。`KEYDOWN V` で録音開始、`KEYUP V` で録音終了と認識開始を行う。
+
+        Returns:
+        - 音声入力イベントとして処理した場合は `True`。それ以外は `False`。
+
+        Caller:
+        - pygame main thread から呼ぶ。worker thread はこの関数を呼ばない。
+        """
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_v:
+            self.voice_input.start_recording()
+            return True
+        if event.type == pygame.KEYUP and event.key == pygame.K_v:
+            self.voice_input.stop_recording_and_transcribe()
+            return True
+        return False
+
+    def consume_voice_input_events(self):
+        """音声認識 worker の結果を main thread 側で消費する。
+
+        Caller:
+        - 毎フレーム呼ぶ。認識済みテキストだけを `eval_text()` に渡し、エラーイベントは音声 UI に任せる。
+        """
+        while True:
+            event = self.voice_input.poll_event()
+            if event is None:
+                return
+            if event.kind == VOICE_EVENT_RECOGNIZED_TEXT and event.text is not None:
+                self.eval_text(event.text)
+
+    def render_voice_input_status(self):
+        """音声入力状態を入力欄付近に描画する。
+
+        Caller:
+        - `VoiceInput` の状態だけを読む。ゲーム状態の変更は行わない。
+        """
+        status_text = self.voice_input.get_status_text()
+        self.voice_status_result = self.voice_status_font.render(status_text, True, Color.WHITE)
+        self.screen.blit(self.voice_status_result, (300, 510))
 
 
 # nlp部分
