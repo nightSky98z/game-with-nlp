@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "basic",
+  "include": [
+    "Main.py",
+    "game",
+    "inference",
+    "training"
+  ],
+  "exclude": [
+    ".venv",
+    "__pycache__",
+    "docs",
+    "unrelated",
+    "test_regressions.py"
+  ]
+}

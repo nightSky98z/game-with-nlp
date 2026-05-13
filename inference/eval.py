@@ -1,11 +1,14 @@
-from TextClassifier import TextClassifierError
-from TextClassifier import load_text_classifier
-from TextClassifier import predict_label_id
-from TextUtils import normalize_text
+from pathlib import Path
+
+from inference.TextClassifier import TextClassifierError
+from inference.TextClassifier import load_text_classifier
+from inference.TextClassifier import predict_label_id
+from inference.TextUtils import normalize_text
 
 
-MODEL1_PATH = "./model1_sklearn.joblib"
-MODEL2_PATH = "./model2_sklearn.joblib"
+MODEL_DIR = Path(__file__).resolve().parent
+MODEL1_PATH = str(MODEL_DIR / "model1_sklearn.joblib")
+MODEL2_PATH = str(MODEL_DIR / "model2_sklearn.joblib")
 
 _model_cache = {}
 

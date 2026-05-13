@@ -163,13 +163,30 @@ class GameRegressionTests(unittest.TestCase):
             "Main",
             "TextUtils",
             "eval",
+            "inference",
+            "inference.TextClassifier",
+            "inference.TextUtils",
+            "inference.eval",
             "Game",
+            "game",
+            "game.SpriteSheet",
+            "game.Sprite",
+            "game.Shop",
+            "game.Building",
+            "game.Character",
+            "game.Item",
+            "game.TextInput",
+            "game.VoiceInput",
+            "game.Game",
+            "game.Color",
+            "game.GameUtils",
+            "game.GameConfig",
             "joblib",
         )
 
     def test_sprite_sheet_missing_asset_uses_requested_rectangle_color(self):
         install_fake_pygame()
-        from SpriteSheet import SpriteSheet
+        from game.SpriteSheet import SpriteSheet
 
         sprite_sheet = SpriteSheet("./resources/missing.png", fallback_color=(255, 255, 255))
         image = sprite_sheet.get_image(0, 0, 16, 16)
@@ -179,8 +196,8 @@ class GameRegressionTests(unittest.TestCase):
 
     def test_shop_missing_asset_uses_blue_rectangle(self):
         install_fake_pygame()
-        from Color import BLUE
-        from Shop import Shop
+        from game.Color import BLUE
+        from game.Shop import Shop
 
         with contextlib.redirect_stdout(io.StringIO()):
             shop = Shop(name="商店", x=10, y=10, sprite=None, game=None, item_type_list=[])
@@ -189,8 +206,8 @@ class GameRegressionTests(unittest.TestCase):
 
     def test_potion_missing_assets_use_hp_red_and_mp_blue_rectangles(self):
         install_fake_pygame()
-        from Color import BLUE, RED
-        from Item import HP_Potion, MP_Potion
+        from game.Color import BLUE, RED
+        from game.Item import HP_Potion, MP_Potion
 
         with contextlib.redirect_stdout(io.StringIO()):
             hp_potion = HP_Potion()
@@ -200,7 +217,7 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual(BLUE, mp_potion.sprite.image.fill_color)
 
     def test_main_constructs_game_once(self):
-        fake_game_module = types.ModuleType("Game")
+        fake_game_module = types.ModuleType("game.Game")
 
         class FakeGame:
             init_count = 0
@@ -217,6 +234,7 @@ class GameRegressionTests(unittest.TestCase):
 
         fake_game_module.Game = FakeGame
         sys.modules["Game"] = fake_game_module
+        sys.modules["game.Game"] = fake_game_module
 
         import Main
 
@@ -226,8 +244,8 @@ class GameRegressionTests(unittest.TestCase):
 
     def test_player_take_returns_false_when_box_is_full(self):
         install_fake_pygame()
-        from Character import Player
-        from Item import HP_Potion, Item, MP_Potion
+        from game.Character import Player
+        from game.Item import HP_Potion, Item, MP_Potion
 
         class FakeSprite:
             def change_position(self, position):
@@ -262,7 +280,7 @@ class GameRegressionTests(unittest.TestCase):
 
     def test_text_input_return_submitted_text_without_game_object(self):
         install_fake_pygame()
-        from TextInput import TextInput
+        from game.TextInput import TextInput
 
         text_input = TextInput(0, 0, 200, 40)
         text_input.active = True
@@ -277,7 +295,7 @@ class GameRegressionTests(unittest.TestCase):
 
     def test_text_input_converts_fullwidth_ascii_on_input_and_submit(self):
         install_fake_pygame()
-        from TextInput import TextInput
+        from game.TextInput import TextInput
 
         text_input = TextInput(0, 0, 200, 40)
         text_input.active = True
@@ -297,13 +315,13 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual("", text_input.text)
 
     def test_normalize_text_applies_nfkc_before_lowercase(self):
-        from TextUtils import normalize_text
+        from inference.TextUtils import normalize_text
 
         self.assertEqual("abchpポーション", normalize_text("ＡＢＣ　HP、ポーション。"))
 
     def test_voice_input_records_transcribes_and_exposes_status(self):
-        from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VOICE_STATE_IDLE, VOICE_STATE_RECORDING
-        from VoiceInput import VOICE_STATE_TRANSCRIBING, VoiceInput
+        from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VOICE_STATE_IDLE, VOICE_STATE_RECORDING
+        from game.VoiceInput import VOICE_STATE_TRANSCRIBING, VoiceInput
 
         class FakeRecorder:
             def __init__(self):
@@ -359,7 +377,7 @@ class GameRegressionTests(unittest.TestCase):
         self.assertEqual("認識: ABC123ポーション", voice_input.get_status_text())
 
     def test_voice_input_reports_transcription_error_without_text_event(self):
-        from VoiceInput import VOICE_EVENT_ERROR, VOICE_STATE_IDLE, VoiceInput
+        from game.VoiceInput import VOICE_EVENT_ERROR, VOICE_STATE_IDLE, VoiceInput
 
         class FakeRecorder:
             def start(self):
@@ -407,7 +425,7 @@ class GameRegressionTests(unittest.TestCase):
             model_path = model_file.name
 
         try:
-            target_eval = importlib.import_module("eval")
+            target_eval = importlib.import_module("inference.eval")
             target_eval.MODEL1_PATH = model_path
             target_eval.predict_category("スライムへ移動")
             target_eval.predict_category("ゴブリンへ移動")
@@ -436,8 +454,9 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.predict_category = raise_model_error
         fake_eval.predict_type = raise_model_error
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
+        from game.Game import Game
 
         game = Game.__new__(Game)
         game.nlp_result_font = FakeFont()
@@ -470,8 +489,9 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.predict_category = lambda text: fake_eval.unknown
         fake_eval.predict_type = lambda text: fake_eval.map
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
+        from game.Game import Game
 
         game = Game.__new__(Game)
         game.nlp_result_font = FakeFont()
@@ -501,9 +521,10 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.box = 1
         fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
-        from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInputEvent
+        from game.Game import Game
+        from game.VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInputEvent
 
         class FakeVoiceInput:
             def __init__(self):
@@ -558,8 +579,9 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.box = 1
         fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
+        from game.Game import Game
 
         class FakeVoiceInput:
             def get_status_text(self):
@@ -592,9 +614,10 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.predict_category = lambda text: fake_eval.buy
         fake_eval.predict_type = lambda text: fake_eval.box
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
-        from Item import HP_Potion, MP_Potion
+        from game.Game import Game
+        from game.Item import HP_Potion, MP_Potion
 
         class FakePlayer:
             def __init__(self):
@@ -648,9 +671,10 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.box = 1
         fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
-        from Item import HP_Potion, MP_Potion
+        from game.Game import Game
+        from game.Item import HP_Potion, MP_Potion
 
         class FakePlayer:
             def __init__(self):
@@ -699,9 +723,10 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.box = 1
         fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
-        from Item import HP_Potion, MP_Potion
+        from game.Game import Game
+        from game.Item import HP_Potion, MP_Potion
 
         class FakePlayer:
             def __init__(self):
@@ -759,9 +784,10 @@ class GameRegressionTests(unittest.TestCase):
         fake_eval.predict_category = lambda text: fake_eval.use
         fake_eval.predict_type = lambda text: fake_eval.box
         sys.modules["eval"] = fake_eval
+        sys.modules["inference.eval"] = fake_eval
 
-        from Game import Game
-        from Item import HP_Potion, MP_Potion
+        from game.Game import Game
+        from game.Item import HP_Potion, MP_Potion
 
         class FakePlayer:
             def __init__(self):
