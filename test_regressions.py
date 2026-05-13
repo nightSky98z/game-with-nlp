@@ -4,6 +4,7 @@ import importlib
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 
@@ -109,6 +110,7 @@ class FakePygame(types.ModuleType):
         self.TEXTINPUT = 5
         self.TEXTEDITING = 6
         self.K_u = 117
+        self.K_v = 118
         self.K_RETURN = 13
         self.K_BACKSPACE = 8
         self.error = Exception
@@ -157,6 +159,7 @@ class GameRegressionTests(unittest.TestCase):
             "Item",
             "TextInput",
             "TextClassifier",
+            "VoiceInput",
             "Main",
             "TextUtils",
             "eval",
@@ -298,6 +301,91 @@ class GameRegressionTests(unittest.TestCase):
 
         self.assertEqual("abchpポーション", normalize_text("ＡＢＣ　HP、ポーション。"))
 
+    def test_voice_input_records_transcribes_and_exposes_status(self):
+        from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VOICE_STATE_IDLE, VOICE_STATE_RECORDING
+        from VoiceInput import VOICE_STATE_TRANSCRIBING, VoiceInput
+
+        class FakeRecorder:
+            def __init__(self):
+                self.started = False
+                self.stopped = False
+
+            def start(self):
+                self.started = True
+
+            def stop_to_wav_file(self):
+                self.stopped = True
+                return "fake.wav"
+
+        transcription_started = threading.Event()
+        continue_transcription = threading.Event()
+
+        class FakeTranscriber:
+            def __init__(self):
+                self.audio_paths = []
+
+            def transcribe(self, audio_path):
+                self.audio_paths.append(audio_path)
+                transcription_started.set()
+                continue_transcription.wait(timeout=1.0)
+                return "ＡＢＣ１２３ポーション"
+
+        recorder = FakeRecorder()
+        transcriber = FakeTranscriber()
+        voice_input = VoiceInput(recorder=recorder, transcriber=transcriber)
+
+        self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
+        self.assertEqual("Vキーで音声入力", voice_input.get_status_text())
+
+        self.assertTrue(voice_input.start_recording())
+        self.assertTrue(recorder.started)
+        self.assertEqual(VOICE_STATE_RECORDING, voice_input.state)
+        self.assertEqual("録音しています", voice_input.get_status_text())
+
+        self.assertTrue(voice_input.stop_recording_and_transcribe())
+        self.assertTrue(recorder.stopped)
+        self.assertTrue(transcription_started.wait(timeout=1.0))
+        self.assertEqual(VOICE_STATE_TRANSCRIBING, voice_input.state)
+        self.assertEqual("音声を認識しています", voice_input.get_status_text())
+
+        continue_transcription.set()
+        self.assertTrue(voice_input.wait_for_pending_transcription(timeout_seconds=1.0))
+        event = voice_input.poll_event()
+
+        self.assertEqual(VOICE_EVENT_RECOGNIZED_TEXT, event.kind)
+        self.assertEqual("ABC123ポーション", event.text)
+        self.assertEqual(["fake.wav"], transcriber.audio_paths)
+        self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
+        self.assertEqual("認識: ABC123ポーション", voice_input.get_status_text())
+
+    def test_voice_input_reports_transcription_error_without_text_event(self):
+        from VoiceInput import VOICE_EVENT_ERROR, VOICE_STATE_IDLE, VoiceInput
+
+        class FakeRecorder:
+            def start(self):
+                pass
+
+            def stop_to_wav_file(self):
+                return "broken.wav"
+
+        class FailingTranscriber:
+            def transcribe(self, audio_path):
+                raise RuntimeError("モデルなし")
+
+        voice_input = VoiceInput(recorder=FakeRecorder(), transcriber=FailingTranscriber())
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            voice_input.start_recording()
+            voice_input.stop_recording_and_transcribe()
+            self.assertTrue(voice_input.wait_for_pending_transcription(timeout_seconds=1.0))
+        event = voice_input.poll_event()
+
+        self.assertEqual(VOICE_EVENT_ERROR, event.kind)
+        self.assertIn("モデルなし", event.message)
+        self.assertIsNone(event.text)
+        self.assertEqual(VOICE_STATE_IDLE, voice_input.state)
+        self.assertIn("音声入力エラー: モデルなし", voice_input.get_status_text())
+
     def test_eval_reuses_loaded_category_model(self):
         load_count = {"model": 0}
 
@@ -398,6 +486,95 @@ class GameRegressionTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIsInstance(game.eval_result, FakeSurface)
         self.assertIsInstance(game.action_result, FakeSurface)
+
+    def test_game_voice_input_key_events_and_result_dispatch(self):
+        pygame = install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        sys.modules["eval"] = fake_eval
+
+        from Game import Game
+        from VoiceInput import VOICE_EVENT_RECOGNIZED_TEXT, VoiceInputEvent
+
+        class FakeVoiceInput:
+            def __init__(self):
+                self.started = 0
+                self.stopped = 0
+                self.events = [VoiceInputEvent(kind=VOICE_EVENT_RECOGNIZED_TEXT, text="スライムへ移動")]
+
+            def start_recording(self):
+                self.started += 1
+                return True
+
+            def stop_recording_and_transcribe(self):
+                self.stopped += 1
+                return True
+
+            def poll_event(self):
+                if len(self.events) == 0:
+                    return None
+                return self.events.pop(0)
+
+        game = Game.__new__(Game)
+        game.voice_input = FakeVoiceInput()
+        game.eval_calls = []
+
+        def fake_eval_text(text):
+            game.eval_calls.append(text)
+            return True
+
+        game.eval_text = fake_eval_text
+        keydown_event = types.SimpleNamespace(type=pygame.KEYDOWN, key=pygame.K_v)
+        keyup_event = types.SimpleNamespace(type=pygame.KEYUP, key=pygame.K_v)
+
+        game.handle_voice_input_event(keydown_event)
+        game.handle_voice_input_event(keyup_event)
+        game.consume_voice_input_events()
+
+        self.assertEqual(1, game.voice_input.started)
+        self.assertEqual(1, game.voice_input.stopped)
+        self.assertEqual(["スライムへ移動"], game.eval_calls)
+
+    def test_game_renders_voice_input_status(self):
+        install_fake_pygame()
+        fake_eval = types.ModuleType("eval")
+        fake_eval.movement = 0
+        fake_eval.combat = 1
+        fake_eval.take = 2
+        fake_eval.use = 3
+        fake_eval.find = 4
+        fake_eval.buy = 5
+        fake_eval.unknown = 6
+        fake_eval.map = 0
+        fake_eval.box = 1
+        fake_eval.ModelLoadError = type("ModelLoadError", (RuntimeError,), {})
+        sys.modules["eval"] = fake_eval
+
+        from Game import Game
+
+        class FakeVoiceInput:
+            def get_status_text(self):
+                return "録音しています"
+
+        game = Game.__new__(Game)
+        game.screen = FakeSurface((800, 600))
+        game.voice_status_font = FakeFont()
+        game.voice_status_result = None
+        game.voice_input = FakeVoiceInput()
+
+        game.render_voice_input_status()
+
+        self.assertEqual("録音しています", game.voice_status_result.rendered_text)
+        self.assertEqual((game.voice_status_result, (300, 510)), game.screen.blit_calls[-1])
 
     def test_ambiguous_buy_potion_waits_for_shop_choice_and_count(self):
         install_fake_pygame()
